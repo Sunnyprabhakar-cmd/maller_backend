@@ -14,12 +14,31 @@ import tokenRoutes from './api/tokens.js'
 dotenv.config()
 
 const DEPLOY_SIGNATURE = createHash('sha1').update('webhook-recovery-v5').digest('hex').slice(0, 12)
+const configuredOrigin = process.env.ELECTRON_ORIGIN || 'http://localhost:5173'
+
+function isAllowedOrigin(origin?: string): boolean {
+  if (!origin) {
+    return true
+  }
+
+  if (origin === configuredOrigin || origin === 'http://localhost:5173' || origin === 'null') {
+    return true
+  }
+
+  return origin.startsWith('file://')
+}
 
 const app = express()
 const httpServer = createServer(app)
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.ELECTRON_ORIGIN || 'http://localhost:5173',
+    origin: (origin, callback) => {
+      if (isAllowedOrigin(origin)) {
+        callback(null, true)
+        return
+      }
+      callback(new Error(`CORS blocked for origin: ${origin}`))
+    },
     methods: ['GET', 'POST']
   }
 })
@@ -28,7 +47,13 @@ const prisma = new PrismaClient()
 
 // Middleware
 app.use(cors({
-  origin: process.env.ELECTRON_ORIGIN || 'http://localhost:5173'
+  origin: (origin, callback) => {
+    if (isAllowedOrigin(origin)) {
+      callback(null, true)
+      return
+    }
+    callback(new Error(`CORS blocked for origin: ${origin}`))
+  }
 }))
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
