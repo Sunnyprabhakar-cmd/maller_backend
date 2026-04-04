@@ -1,0 +1,72 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Campaign {
+  id        String   @id @default(cuid())
+  name      String
+  subject   String
+  template  String   @db.Text
+  csvData   String?  @db.Text
+  sourceType String  @default("cid") // "cid" or "url"
+  imageUrl  String?
+  imageCid  String?
+  webhookUrl String?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  recipients CampaignRecipient[]
+  events     WebhookEvent[]
+
+  @@index([createdAt])
+}
+
+model CampaignRecipient {
+  id         String   @id @default(cuid())
+  campaignId String
+  email      String
+  name       String?
+  data       Json?    // CSV row data for template interpolation
+
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, email])
+  @@index([campaignId])
+  @@index([email])
+}
+
+model WebhookEvent {
+  id         String   @id @default(cuid())
+  campaignId String
+  email      String
+  event      String   // "delivered", "clicked", "opened", "failed", etc.
+  timestamp  DateTime @default(now())
+  data       Json?    // Raw Mailgun event data
+
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+  @@index([email])
+  @@index([event])
+  @@index([timestamp])
+}
+
+model ApiToken {
+  id        String   @id @default(cuid())
+  name      String
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  lastUsedAt DateTime?
+
+  @@index([token])
+}
