@@ -23,7 +23,7 @@ services:
       - key: API_TOKEN
         sync: false
       - key: WEBHOOK_URL
-        value: https://maigun-backend.onrender.com/api/webhooks
+        value: https://maller-backend-1.onrender.com/api/webhooks
       - key: ELECTRON_ORIGIN
         value: "*" # Allow from any Electron client instance
 
