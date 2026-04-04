@@ -1,13 +1,12 @@
 import { app, BrowserWindow, ipcMain, dialog } from "electron";
 import path from "node:path";
-import { randomUUID, createHmac, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import fs$1 from "node:fs/promises";
 import require$$0 from "stream";
 import { existsSync } from "fs";
 import { resolve } from "path";
 import { fileURLToPath } from "url";
-import { createServer } from "node:http";
 import __cjs_mod__ from "node:module";
 const __filename = import.meta.filename;
 const __dirname = import.meta.dirname;
@@ -2072,282 +2071,8 @@ class QueueService {
     };
   }
 }
-function normalizeEventType(input) {
-  const event = String(input ?? "").toLowerCase();
-  if (event === "opened" || event === "clicked" || event === "delivered" || event === "complained" || event === "unsubscribed" || event === "failed" || event === "sent") {
-    return event;
-  }
-  if (event === "permanent_fail" || event === "temporary_fail" || event === "bounced") {
-    return "bounced";
-  }
-  return event || "failed";
-}
-function sanitizeLogText(value) {
-  return String(value ?? "").replace(/[\r\n\t]/g, " ").slice(0, 500);
-}
-function parseJsonObject(input) {
-  try {
-    const parsed = JSON.parse(input, (_key, value) => {
-      if (value && typeof value === "object" && !Array.isArray(value)) {
-        return Object.assign(/* @__PURE__ */ Object.create(null), value);
-      }
-      return value;
-    });
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return void 0;
-    }
-    return parsed;
-  } catch {
-    return void 0;
-  }
-}
-function toSafePayload(campaignId, email, event) {
-  return {
-    campaignId: campaignId ?? "",
-    email,
-    event
-  };
-}
-function parseCampaignId(value) {
-  const str = String(value ?? "").trim();
-  return str || void 0;
-}
-function resolveCampaignId(storage2, explicitCampaignId, recipientEmail) {
-  if (explicitCampaignId?.trim()) {
-    return explicitCampaignId.trim();
-  }
-  const allCampaigns = storage2.listCampaigns();
-  for (const campaign of allCampaigns) {
-    const matched = storage2.listRecipients(campaign.id).find((entry) => entry.email.toLowerCase() === recipientEmail.toLowerCase());
-    if (matched) {
-      return campaign.id;
-    }
-  }
-  return void 0;
-}
-function parsePayload(body, contentType) {
-  const ct = String(contentType ?? "").toLowerCase();
-  if (ct.includes("application/x-www-form-urlencoded")) {
-    const params = new URLSearchParams(body);
-    const eventDataRaw = params.get("event-data");
-    const topLevelTimestamp = params.get("timestamp") ?? void 0;
-    const topLevelToken = params.get("token") ?? void 0;
-    const topLevelSignature = params.get("signature") ?? void 0;
-    if (eventDataRaw) {
-      if (eventDataRaw.length > 256 * 1024) {
-        return void 0;
-      }
-      const eventDataObj = parseJsonObject(eventDataRaw);
-      if (!eventDataObj) {
-        return void 0;
-      }
-      const eventData2 = eventDataObj;
-      const vars = eventData2["user-variables"] ?? eventData2.user_variables ?? {};
-      const campaignId3 = parseCampaignId(vars.campaignId);
-      const email3 = String(eventData2.recipient ?? "");
-      const event3 = String(eventData2.event ?? "");
-      const signature2 = eventData2.signature;
-      const resolvedSignature = signature2?.timestamp && signature2?.token && signature2?.signature ? {
-        timestamp: String(signature2.timestamp),
-        token: String(signature2.token),
-        signature: String(signature2.signature)
-      } : topLevelTimestamp && topLevelToken && topLevelSignature ? {
-        timestamp: String(topLevelTimestamp),
-        token: String(topLevelToken),
-        signature: String(topLevelSignature)
-      } : void 0;
-      return {
-        campaignId: campaignId3,
-        email: email3,
-        event: event3,
-        signature: resolvedSignature,
-        payload: toSafePayload(campaignId3, email3, event3)
-      };
-    }
-    const campaignId2 = parseCampaignId(params.get("campaignId"));
-    const email2 = String(params.get("recipient") ?? params.get("email") ?? "");
-    const event2 = String(params.get("event") ?? "");
-    const signature = topLevelTimestamp && topLevelToken && topLevelSignature ? {
-      timestamp: String(topLevelTimestamp),
-      token: String(topLevelToken),
-      signature: String(topLevelSignature)
-    } : void 0;
-    return {
-      campaignId: campaignId2,
-      email: email2,
-      event: event2,
-      signature,
-      payload: toSafePayload(campaignId2, email2, event2)
-    };
-  }
-  const parsed = parseJsonObject(body);
-  if (!parsed) {
-    return void 0;
-  }
-  const eventData = parsed["event-data"] ?? parsed.event_data;
-  if (eventData) {
-    const vars = eventData["user-variables"] ?? eventData.user_variables ?? {};
-    const campaignId2 = parseCampaignId(vars.campaignId);
-    const email2 = String(eventData.recipient ?? "");
-    const event2 = String(eventData.event ?? "");
-    const signature = eventData.signature;
-    return {
-      campaignId: campaignId2,
-      email: email2,
-      event: event2,
-      signature: signature?.timestamp && signature?.token && signature?.signature ? {
-        timestamp: String(signature.timestamp),
-        token: String(signature.token),
-        signature: String(signature.signature)
-      } : void 0,
-      payload: toSafePayload(campaignId2, email2, event2)
-    };
-  }
-  const campaignId = parseCampaignId(parsed.campaignId);
-  const email = String(parsed.email ?? parsed.recipient ?? "");
-  const event = String(parsed.event ?? "");
-  return {
-    campaignId,
-    email,
-    event,
-    payload: toSafePayload(campaignId, email, event)
-  };
-}
-function verifyWebhookSignature(storage2, signature) {
-  const secret = storage2.getSettings().webhookSecret.trim();
-  if (!secret) {
-    return true;
-  }
-  if (!signature?.timestamp || !signature?.token || !signature?.signature) {
-    return false;
-  }
-  const digestHex = createHmac("sha256", secret).update(`${signature.timestamp}${signature.token}`).digest("hex");
-  const received = Buffer.from(signature.signature, "hex");
-  const expected = Buffer.from(digestHex, "hex");
-  if (received.length !== expected.length) {
-    return false;
-  }
-  return timingSafeEqual(received, expected);
-}
-function createServerForPort(storage2, options) {
-  return createServer((req, res) => {
-    const requestUrl = new URL(req.url ?? "/", "http://localhost");
-    const normalizedPath = requestUrl.pathname.replace(/\/+$/, "") || "/";
-    if (req.method !== "POST" || normalizedPath !== "/webhooks/mailgun") {
-      res.statusCode = 404;
-      res.end("Not found");
-      return;
-    }
-    const maxBodyBytes = 1024 * 1024;
-    let body = "";
-    let ended = false;
-    req.on("data", (chunk) => {
-      if (ended) {
-        return;
-      }
-      body += chunk.toString("utf8");
-      if (Buffer.byteLength(body, "utf8") > maxBodyBytes) {
-        ended = true;
-        res.statusCode = 413;
-        res.end("Payload too large");
-        req.destroy();
-      }
-    });
-    req.on("end", () => {
-      if (ended) {
-        return;
-      }
-      try {
-        const parsed = parsePayload(body, req.headers["content-type"]);
-        if (!parsed) {
-          res.statusCode = 400;
-          res.end("invalid payload");
-          return;
-        }
-        if (!verifyWebhookSignature(storage2, parsed.signature)) {
-          res.statusCode = 401;
-          res.end("invalid webhook signature");
-          return;
-        }
-        const email = String(parsed.email ?? "").trim().toLowerCase();
-        const eventType = normalizeEventType(parsed.event);
-        if (!email || !eventType) {
-          res.statusCode = 202;
-          res.end("ignored");
-          return;
-        }
-        const campaignId = resolveCampaignId(storage2, parsed.campaignId, email);
-        if (!campaignId) {
-          res.statusCode = 202;
-          res.end("campaign not found");
-          return;
-        }
-        const createdAt = (/* @__PURE__ */ new Date()).toISOString();
-        storage2.addEvent({
-          id: randomUUID(),
-          campaignId,
-          recipientEmail: email,
-          type: eventType,
-          payload: {
-            ...parsed.payload ?? {},
-            _source: "mailgun-webhook"
-          },
-          createdAt
-        });
-        options?.onEvent?.({ campaignId, email, eventType, createdAt });
-        if (eventType === "bounced" || eventType === "complained" || eventType === "unsubscribed") {
-          storage2.addSuppression(email);
-        }
-        res.statusCode = 200;
-        res.end("ok");
-      } catch (error) {
-        res.statusCode = 400;
-        res.end("invalid payload");
-        console.error("Webhook payload processing failed:", sanitizeLogText(error.message));
-      }
-    });
-  });
-}
-async function listenOnAvailablePort(storage2, options, preferredPort = 3535) {
-  for (let port = preferredPort; port <= preferredPort + 10; port += 1) {
-    const server = createServerForPort(storage2, options);
-    const listenPort = await new Promise((resolve2) => {
-      const onError = (error) => {
-        server.off("listening", onListening);
-        if (error.code === "EADDRINUSE") {
-          resolve2(void 0);
-          return;
-        }
-        throw error;
-      };
-      const onListening = () => {
-        server.off("error", onError);
-        const address = server.address();
-        resolve2(address?.port ?? port);
-      };
-      server.once("error", onError);
-      server.once("listening", onListening);
-      server.listen(port, "127.0.0.1");
-    });
-    if (listenPort) {
-      return { server, port: listenPort };
-    }
-    await new Promise((resolve2) => setTimeout(resolve2, 50));
-  }
-  throw new Error("Unable to start webhook server: all ports are in use");
-}
-async function startWebhookServer(storage2, options) {
-  const { server, port } = await listenOnAvailablePort(storage2, options);
-  console.log(`Mailgun webhook server listening on 127.0.0.1:${port}`);
-  return {
-    close: () => server.close(),
-    port
-  };
-}
 const storage = new StorageService();
 const queue = new QueueService(storage);
-let webhookServer;
-let webhookPort = 3535;
 function resolvePreloadPath() {
   const candidates = [
     path.join(__dirname, "../preload/index.js"),
@@ -2375,19 +2100,10 @@ function createWindow() {
 }
 app.whenReady().then(async () => {
   queue.start();
-  webhookServer = await startWebhookServer(storage, {
-    onEvent: (payload) => {
-      for (const win of BrowserWindow.getAllWindows()) {
-        win.webContents.send("webhook:received", payload);
-      }
-    }
-  });
-  webhookPort = webhookServer.port;
   createWindow();
 });
 app.on("window-all-closed", () => {
   queue.stop();
-  webhookServer?.close();
   if (process.platform !== "darwin") {
     app.quit();
   }
@@ -2398,7 +2114,7 @@ app.on("activate", () => {
   }
 });
 ipcMain.handle("app:get-state", () => storage.getState());
-ipcMain.handle("webhook:port", () => webhookPort);
+ipcMain.handle("webhook:port", () => null);
 ipcMain.handle("campaign:create", (_event, input) => {
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const campaign = {

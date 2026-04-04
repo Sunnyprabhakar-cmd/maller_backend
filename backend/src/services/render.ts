@@ -86,7 +86,7 @@ export function buildEmailHtml(options: BuildEmailHtmlOptions): string {
         <div class="content">
           ${imageUrl ? `<img src="${imageUrl}" alt="Campaign banner" class="banner">` : ''}
           ${html}
-          ${options.webhookUrl ? `<img src="${options.webhookUrl}?campaign_id={{campaign_id}}&email={{email}}" style="display:none;" alt="">` : ''}
+          ${options.webhookUrl ? `<img src="${options.webhookUrl}?campaign_id={{campaign_id}}&email={{email}}" width="1" height="1" alt="" style="border:0;">` : ''}
         </div>
         <div class="footer">
           <p>© 2024. This is an automated email.</p>

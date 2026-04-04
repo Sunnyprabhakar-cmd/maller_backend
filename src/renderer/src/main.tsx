@@ -176,6 +176,19 @@ function normalizeRemoteEvent(event: any): any {
   }
 }
 
+function normalizeSocketWebhookEvent(event: any): any {
+  return {
+    id: '',
+    campaignId: String(event?.campaignId ?? ''),
+    recipientEmail: String(event?.email ?? event?.recipientEmail ?? event?.recipient ?? ''),
+    type: canonicalEventType(event?.event ?? event?.type ?? 'failed'),
+    payload: {
+      _source: 'mailgun-webhook'
+    },
+    createdAt: event?.timestamp ?? new Date().toISOString()
+  }
+}
+
 function normalizeEmail(input: any): string {
   return String(input ?? '').trim().toLowerCase()
 }
@@ -917,8 +930,8 @@ function App() {
       const mergedSelectedEvents = mergeEventsUnique(Array.isArray(eventRows) ? eventRows : [], remoteEventRows)
       const mergedAllEvents = mergeEventsUnique(Array.isArray(allEventRows) ? allEventRows : [], remoteEventRows)
 
-      setEvents(mergedSelectedEvents)
-      setAllEvents(mergedAllEvents)
+      setEvents((prev) => mergeEventsUnique(prev, mergedSelectedEvents))
+      setAllEvents((prev) => mergeEventsUnique(prev, mergedAllEvents))
       setProgress(pg)
       setCampaignProgressMap((prev) => ({ ...prev, [selectedCampaignId]: pg }))
       setCampaigns((prev) => prev.map((campaign) => campaign.id === selectedCampaignId
@@ -945,7 +958,14 @@ function App() {
     const unsubscribe = wsClient.on('webhook:event', async (payload: any) => {
       try {
         const campaignId = String(payload?.campaignId ?? '')
+        const liveSocketEvent = normalizeSocketWebhookEvent(payload)
+        if (campaignId) {
+          setAllEvents((prev) => mergeEventsUnique(prev, [liveSocketEvent]))
+        }
+
         if (campaignId && campaignId === selectedCampaignId) {
+          setEvents((prev) => mergeEventsUnique(prev, [liveSocketEvent]))
+
           const [eventRows, pg, selectedRecipients] = await Promise.all([
             window.maigun.listEvents(selectedCampaignId),
             window.maigun.getCampaignProgress(selectedCampaignId),
@@ -970,7 +990,7 @@ function App() {
             remoteEventRows = []
           }
 
-          setEvents(mergeEventsUnique(Array.isArray(eventRows) ? eventRows : [], remoteEventRows))
+          setEvents((prev) => mergeEventsUnique(prev, mergeEventsUnique(Array.isArray(eventRows) ? eventRows : [], remoteEventRows)))
           setProgress(pg)
           setCampaignProgressMap((prev) => ({ ...prev, [selectedCampaignId]: pg }))
           setCampaigns((prev) => prev.map((campaign) => campaign.id === selectedCampaignId
@@ -985,7 +1005,7 @@ function App() {
           })
         }
         const allEventRows = await window.maigun.listEvents()
-        setAllEvents(Array.isArray(allEventRows) ? allEventRows : [])
+        setAllEvents((prev) => mergeEventsUnique(prev, Array.isArray(allEventRows) ? allEventRows : []))
       } catch {
         // polling remains as a fallback
       }
@@ -993,6 +1013,58 @@ function App() {
 
     return () => {
       unsubscribe?.()
+    }
+  }, [selectedCampaignId])
+
+  useEffect(() => {
+    let isActive = true
+
+    const syncAllCampaignAnalytics = async () => {
+      try {
+        const remoteCampaignList = await apiClient.getCampaigns()
+        if (!Array.isArray(remoteCampaignList) || remoteCampaignList.length === 0 || !isActive) {
+          return
+        }
+
+        const remoteEventRows = await Promise.all(remoteCampaignList.map(async (entry: any) => {
+          const campaignId = String(entry?.id ?? '')
+          if (!campaignId) {
+            return []
+          }
+          try {
+            const events = await apiClient.getCampaignEvents(campaignId)
+            return Array.isArray(events) ? events.map(normalizeRemoteEvent) : []
+          } catch {
+            return []
+          }
+        }))
+
+        if (!isActive) {
+          return
+        }
+
+        const flatRemoteEvents = remoteEventRows.flat()
+        setCampaigns((prev) => mergeCampaignLists(prev, remoteCampaignList))
+        setAllEvents((prev) => {
+          const merged = mergeEventsUnique(prev, flatRemoteEvents)
+          if (selectedCampaignId) {
+            setEvents(merged.filter((entry: any) => String(entry?.campaignId ?? '') === selectedCampaignId))
+          }
+          return merged
+        })
+      } catch {
+        // periodic sync is best-effort
+      }
+    }
+
+    void syncAllCampaignAnalytics()
+    const timer = setInterval(() => {
+      void syncAllCampaignAnalytics()
+    }, 8000)
+
+    return () => {
+      isActive = false
+      clearInterval(timer)
     }
   }, [selectedCampaignId])
 

@@ -3,7 +3,7 @@ services:
     name: maigun-backend
     runtime: node
     plan: free
-    buildCommand: "cd backend && npm install && npm run build && npm run db:push"
+    buildCommand: "cd backend && npm install && npm run db:generate && npm run build"
     startCommand: "cd backend && npm start"
     envVars:
       - key: NODE_ENV
@@ -16,12 +16,14 @@ services:
           property: connectionString
       - key: MAILGUN_API_KEY
         sync: false
+      - key: MAILGUN_WEBHOOK_SIGNING_KEY
+        sync: false
       - key: MAILGUN_DOMAIN
         sync: false
       - key: API_TOKEN
         sync: false
       - key: WEBHOOK_URL
-        value: https://maigun-backend.onrender.com/api/webhooks
+        value: https://maller-backend-1.onrender.com/api/webhooks
       - key: ELECTRON_ORIGIN
         value: "*" # Allow from any Electron client instance
 

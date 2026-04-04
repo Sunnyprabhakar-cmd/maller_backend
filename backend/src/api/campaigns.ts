@@ -15,6 +15,8 @@ router.post('/', async (req: Request, res: Response) => {
     const { name, subject, template, sourceType, imageUrl, imageCid } = req.body
     const prisma = (req as any).prisma as PrismaClient
 
+    const webhookUrl = process.env.WEBHOOK_URL || `https://${process.env.RENDER_EXTERNAL_HOSTNAME || 'localhost:3000'}/track/open`
+
     const campaign = await prisma.campaign.create({
       data: {
         name,
@@ -22,7 +24,8 @@ router.post('/', async (req: Request, res: Response) => {
         template,
         sourceType: sourceType || 'cid',
         imageUrl,
-        imageCid
+        imageCid,
+        webhookUrl
       }
     })
 
