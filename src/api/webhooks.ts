@@ -13,6 +13,9 @@ interface MailgunEvent {
   'event-data'?: {
     event?: string
     recipient?: string
+    variables?: Record<string, unknown>
+    user_variables?: Record<string, unknown>
+    'user-variables'?: Record<string, unknown>
     message?: {
       headers?: {
         'message-id'?: string
@@ -117,6 +120,72 @@ function extractCampaignId(payload: any): string | null {
   return null
 }
 
+function buildPlaceholderCampaign(campaignId: string, email?: string | null) {
+  const suffix = campaignId.slice(0, 8)
+  const now = new Date()
+
+  return {
+    name: `Recovered campaign ${suffix}`,
+    subject: `Webhook activity for ${email || 'unknown recipient'}`,
+    template: '<p>Webhook activity received.</p>',
+    sourceType: 'url' as const,
+    imageUrl: null,
+    imageCid: null,
+    webhookUrl: null,
+    createdAt: now,
+    updatedAt: now
+  }
+}
+
+function buildRecoveredCampaignId(email: string): string {
+  const normalized = email.trim().toLowerCase()
+  const digest = crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 24)
+  return `recovered-${digest}`
+}
+
+async function resolveCampaignId(prisma: PrismaClient, explicitCampaignId: string | null, email: string): Promise<string | null> {
+  if (explicitCampaignId) {
+    return explicitCampaignId
+  }
+
+  const recentEvent = await prisma.webhookEvent.findFirst({
+    where: {
+      email: {
+        equals: email,
+        mode: 'insensitive'
+      }
+    },
+    orderBy: {
+      timestamp: 'desc'
+    },
+    select: {
+      campaignId: true
+    }
+  })
+
+  if (recentEvent?.campaignId) {
+    return recentEvent.campaignId
+  }
+
+  const recipient = await prisma.campaignRecipient.findFirst({
+    where: {
+      email: {
+        equals: email,
+        mode: 'insensitive'
+      }
+    },
+    select: {
+      campaignId: true
+    }
+  })
+
+  if (recipient?.campaignId) {
+    return recipient.campaignId
+  }
+
+  return null
+}
+
 // Handle Mailgun webhooks
 router.post('/', async (req: Request, res: Response) => {
   try {
@@ -144,20 +213,25 @@ router.post('/', async (req: Request, res: Response) => {
 
     console.log(`[Webhook] Received ${event} for ${email} (campaign: ${campaignId})`)
 
-    // Prevent FK violations for Mailgun tests or events without campaign context
-    if (!campaignId) {
-      console.warn('[Webhook] Skipping persistence: missing campaign_id')
-      return res.json({ success: true, skipped: true, reason: 'missing_campaign_id' })
+    let resolvedCampaignId = await resolveCampaignId(prisma, campaignId, email)
+    if (!resolvedCampaignId) {
+      resolvedCampaignId = buildRecoveredCampaignId(email)
+      console.warn(`[Webhook] No campaign mapping found; using recovered id (${resolvedCampaignId})`)
     }
 
     const campaign = await prisma.campaign.findUnique({
-      where: { id: campaignId },
+      where: { id: resolvedCampaignId },
       select: { id: true }
     })
 
     if (!campaign) {
-      console.warn(`[Webhook] Skipping persistence: campaign not found (${campaignId})`)
-      return res.json({ success: true, skipped: true, reason: 'campaign_not_found' })
+      console.warn(`[Webhook] Creating placeholder campaign for missing id (${resolvedCampaignId})`)
+      await prisma.campaign.create({
+        data: {
+          id: resolvedCampaignId,
+          ...buildPlaceholderCampaign(resolvedCampaignId, email)
+        }
+      })
     }
 
     // Store webhook event
@@ -165,7 +239,7 @@ router.post('/', async (req: Request, res: Response) => {
     try {
       webhookEvent = await prisma.webhookEvent.create({
         data: {
-          campaignId,
+          campaignId: resolvedCampaignId,
           email,
           event,
           data: eventData
@@ -182,7 +256,7 @@ router.post('/', async (req: Request, res: Response) => {
     // Broadcast to connected clients via socket.io
     if (io) {
       io.emit('webhook:event', {
-        campaignId,
+        campaignId: resolvedCampaignId,
         email,
         event,
         timestamp: new Date()
