@@ -145,7 +145,24 @@ function buildRecoveredCampaignId(email: string): string {
 
 async function resolveCampaignId(prisma: PrismaClient, explicitCampaignId: string | null, email: string): Promise<string | null> {
   if (explicitCampaignId) {
+    // Trust Mailgun-provided campaign id and let placeholder creation handle first-seen campaigns.
     return explicitCampaignId
+  }
+
+  const recipient = await prisma.campaignRecipient.findFirst({
+    where: {
+      email: {
+        equals: email,
+        mode: 'insensitive'
+      }
+    },
+    select: {
+      campaignId: true
+    }
+  })
+
+  if (recipient?.campaignId) {
+    return recipient.campaignId
   }
 
   const recentEvent = await prisma.webhookEvent.findFirst({
@@ -163,24 +180,8 @@ async function resolveCampaignId(prisma: PrismaClient, explicitCampaignId: strin
     }
   })
 
-  if (recentEvent?.campaignId) {
+  if (recentEvent?.campaignId && !String(recentEvent.campaignId).startsWith('recovered-')) {
     return recentEvent.campaignId
-  }
-
-  const recipient = await prisma.campaignRecipient.findFirst({
-    where: {
-      email: {
-        equals: email,
-        mode: 'insensitive'
-      }
-    },
-    select: {
-      campaignId: true
-    }
-  })
-
-  if (recipient?.campaignId) {
-    return recipient.campaignId
   }
 
   return null
@@ -237,6 +238,27 @@ router.post('/', async (req: Request, res: Response) => {
     // Store webhook event
     let webhookEvent
     try {
+      const existingEvent = await prisma.webhookEvent.findFirst({
+        where: {
+          campaignId: resolvedCampaignId,
+          email: {
+            equals: email,
+            mode: 'insensitive'
+          },
+          event,
+          data: {
+            equals: eventData
+          }
+        },
+        select: {
+          id: true
+        }
+      })
+
+      if (existingEvent?.id) {
+        return res.json({ success: true, duplicate: true, eventId: existingEvent.id })
+      }
+
       webhookEvent = await prisma.webhookEvent.create({
         data: {
           campaignId: resolvedCampaignId,

@@ -6,14 +6,11 @@ import fs from 'node:fs/promises'
 import { StorageService } from './services/storage'
 import { parseRecipientsCsv } from './services/csv'
 import { QueueService } from './services/queue'
-import { startWebhookServer } from './services/webhook'
 import type { AppSettings, Campaign } from './types'
 import { sendWithMailgun } from './services/mailer'
 
 const storage = new StorageService()
 const queue = new QueueService(storage)
-let webhookServer: { close: () => void } | undefined
-let webhookPort = 3535
 
 function resolvePreloadPath(): string {
   const candidates = [
@@ -46,20 +43,11 @@ function createWindow(): BrowserWindow {
 
 app.whenReady().then(async () => {
   queue.start()
-  webhookServer = await startWebhookServer(storage, {
-    onEvent: (payload) => {
-      for (const win of BrowserWindow.getAllWindows()) {
-        win.webContents.send('webhook:received', payload)
-      }
-    }
-  })
-  webhookPort = webhookServer.port
   createWindow()
 })
 
 app.on('window-all-closed', () => {
   queue.stop()
-  webhookServer?.close()
   if (process.platform !== 'darwin') {
     app.quit()
   }
@@ -72,7 +60,7 @@ app.on('activate', () => {
 })
 
 ipcMain.handle('app:get-state', () => storage.getState())
-ipcMain.handle('webhook:port', () => webhookPort)
+ipcMain.handle('webhook:port', () => null)
 
 ipcMain.handle('campaign:create', (_event, input: Partial<Campaign>) => {
   const now = new Date().toISOString()

@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import { apiClient } from './api-client'
+import { wsClient } from './ws-client'
 import './styles.css'
 
 function svgToDataUri(svg: string): string {
@@ -36,6 +37,19 @@ const DEFAULT_SOCIAL_ICON_URLS: Record<string, string> = {
   linkedin: socialFallbackDataUri('in'),
   whatsapp: socialFallbackDataUri('wa'),
   youtube: socialFallbackDataUri('yt')
+}
+
+const DEFAULT_API_URL = process.env.REACT_APP_API_URL || 'https://maller-backend-1.onrender.com/api'
+
+function deriveBackendWebhookEndpoint(apiUrl: string): string {
+  const trimmed = String(apiUrl ?? '').trim().replace(/\/+$/, '')
+  if (!trimmed) {
+    return '/api/webhooks'
+  }
+  if (trimmed.endsWith('/api')) {
+    return `${trimmed}/webhooks`
+  }
+  return `${trimmed}/api/webhooks`
 }
 
 type Campaign = {
@@ -140,17 +154,105 @@ function deriveCampaignStatus(baseStatus: string | undefined, progress: Progress
 }
 
 function normalizeRemoteEvent(event: any): any {
+  const rawType = String(event?.event ?? event?.type ?? 'failed').toLowerCase()
+  const normalizedType = rawType === 'open'
+    ? 'opened'
+    : rawType === 'click'
+      ? 'clicked'
+      : rawType === 'bounce'
+        ? 'bounced'
+        : rawType
+
   return {
     id: String(event?.id ?? ''),
     campaignId: String(event?.campaignId ?? ''),
-    recipientEmail: String(event?.email ?? event?.recipientEmail ?? ''),
-    type: String(event?.event ?? event?.type ?? 'failed'),
+    recipientEmail: String(event?.email ?? event?.recipientEmail ?? event?.recipient ?? ''),
+    type: normalizedType,
     payload: {
       ...(event?.data ?? event?.payload ?? {}),
       _source: 'mailgun-webhook'
     },
     createdAt: event?.timestamp ?? event?.createdAt ?? new Date().toISOString()
   }
+}
+
+function normalizeEmail(input: any): string {
+  return String(input ?? '').trim().toLowerCase()
+}
+
+function hasRealWebhookEvent(rows: any[]): boolean {
+  return rows.some((event) => event?.payload?._source === 'mailgun-webhook' && event?.payload?._simulated !== true)
+}
+
+async function fetchRecoveredHostedEventsForRecipients(recipientEmails: Set<string>): Promise<any[]> {
+  if (recipientEmails.size === 0) {
+    return []
+  }
+
+  try {
+    const campaigns = await apiClient.getCampaigns()
+    const recoveredCampaignIds = (Array.isArray(campaigns) ? campaigns : [])
+      .map((entry: any) => String(entry?.id ?? ''))
+      .filter((id: string) => id.startsWith('recovered-'))
+
+    if (recoveredCampaignIds.length === 0) {
+      return []
+    }
+
+    const rows = await Promise.all(recoveredCampaignIds.map(async (id: string) => {
+      try {
+        const events = await apiClient.getCampaignEvents(id)
+        return Array.isArray(events) ? events.map(normalizeRemoteEvent) : []
+      } catch {
+        return []
+      }
+    }))
+
+    return rows
+      .flat()
+      .filter((event) => recipientEmails.has(normalizeEmail(event?.recipientEmail)))
+  } catch {
+    return []
+  }
+}
+
+function mergeEventsUnique(localEvents: any[], remoteEvents: any[]) {
+  const merged = new Map<string, any>()
+  const keyFor = (event: any) => {
+    const idPart = String(event?.id ?? '')
+    if (idPart) {
+      return `id:${idPart}`
+    }
+    return [
+      String(event?.campaignId ?? ''),
+      String(event?.recipientEmail ?? event?.email ?? ''),
+      String(event?.type ?? event?.event ?? ''),
+      String(event?.createdAt ?? event?.timestamp ?? '')
+    ].join('|')
+  }
+
+  for (const event of [...localEvents, ...remoteEvents]) {
+    merged.set(keyFor(event), event)
+  }
+
+  return [...merged.values()].sort((left, right) => {
+    const a = new Date(String(left?.createdAt ?? left?.timestamp ?? 0)).getTime()
+    const b = new Date(String(right?.createdAt ?? right?.timestamp ?? 0)).getTime()
+    return b - a
+  })
+}
+
+function canonicalEventType(value: any): string {
+  const raw = String(value ?? '').toLowerCase()
+  if (raw === 'open') return 'opened'
+  if (raw === 'click') return 'clicked'
+  if (raw === 'bounce') return 'bounced'
+  return raw
+}
+
+function isWebhookMetricEvent(event: any): boolean {
+  const type = canonicalEventType(event?.type ?? event?.event)
+  return type === 'delivered' || type === 'opened' || type === 'clicked' || type === 'bounced' || type === 'failed' || type === 'accepted'
 }
 
 function mergeCampaignLists(localCampaigns: Campaign[], remoteCampaigns: any[]) {
@@ -303,7 +405,7 @@ function App() {
   const [previewHtml, setPreviewHtml] = useState('')
   const [previewGeneratedAt, setPreviewGeneratedAt] = useState('')
   const [socialIconUrls, setSocialIconUrls] = useState<Record<string, string>>(DEFAULT_SOCIAL_ICON_URLS)
-  const [webhookPort, setWebhookPort] = useState<number>(3535)
+  const [webhookEndpoint, setWebhookEndpoint] = useState<string>(deriveBackendWebhookEndpoint(DEFAULT_API_URL))
   const htmlBodyRef = useRef<HTMLTextAreaElement | null>(null)
   const lastInsertRef = useRef<{ body: string; snippet: string; cursor: number; at: number } | null>(null)
 
@@ -771,17 +873,7 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const fetchPort = async () => {
-      try {
-        const port = await window.maigun?.getWebhookPort?.()
-        if (typeof port === 'number' && Number.isFinite(port) && port > 0) {
-          setWebhookPort(port)
-        }
-      } catch {
-        // keep default
-      }
-    }
-    void fetchPort()
+    setWebhookEndpoint(deriveBackendWebhookEndpoint(DEFAULT_API_URL))
   }, [])
 
   useEffect(() => {
@@ -797,13 +889,36 @@ function App() {
     if (!window.maigun) return
     if (!selectedCampaignId) return
     const tick = async () => {
-      const [eventRows, allEventRows, pg] = await Promise.all([
+      const [eventRows, allEventRows, pg, selectedRecipients] = await Promise.all([
         window.maigun.listEvents(selectedCampaignId),
         window.maigun.listEvents(),
-        window.maigun.getCampaignProgress(selectedCampaignId)
+        window.maigun.getCampaignProgress(selectedCampaignId),
+        window.maigun.listRecipients(selectedCampaignId)
       ])
-      setEvents(eventRows)
-      setAllEvents(allEventRows)
+
+      const selectedRecipientEmails = new Set(
+        (Array.isArray(selectedRecipients) ? selectedRecipients : [])
+          .map((entry: any) => normalizeEmail(entry?.email))
+          .filter(Boolean)
+      )
+
+      let remoteEventRows: any[] = []
+      try {
+        const remote = await apiClient.getCampaignEvents(selectedCampaignId)
+        remoteEventRows = Array.isArray(remote) ? remote.map(normalizeRemoteEvent) : []
+        if (!hasRealWebhookEvent(remoteEventRows) && selectedRecipientEmails.size > 0) {
+          const recoveredRows = await fetchRecoveredHostedEventsForRecipients(selectedRecipientEmails)
+          remoteEventRows = mergeEventsUnique(remoteEventRows, recoveredRows)
+        }
+      } catch {
+        remoteEventRows = []
+      }
+
+      const mergedSelectedEvents = mergeEventsUnique(Array.isArray(eventRows) ? eventRows : [], remoteEventRows)
+      const mergedAllEvents = mergeEventsUnique(Array.isArray(allEventRows) ? allEventRows : [], remoteEventRows)
+
+      setEvents(mergedSelectedEvents)
+      setAllEvents(mergedAllEvents)
       setProgress(pg)
       setCampaignProgressMap((prev) => ({ ...prev, [selectedCampaignId]: pg }))
       setCampaigns((prev) => prev.map((campaign) => campaign.id === selectedCampaignId
@@ -825,19 +940,37 @@ function App() {
   }, [selectedCampaignId])
 
   useEffect(() => {
-    const subscribe = window.maigun?.onWebhookReceived
-    if (!subscribe) {
-      return
-    }
-    const unsubscribe = subscribe(async (payload: any) => {
+    wsClient.connect()
+
+    const unsubscribe = wsClient.on('webhook:event', async (payload: any) => {
       try {
         const campaignId = String(payload?.campaignId ?? '')
         if (campaignId && campaignId === selectedCampaignId) {
-          const [eventRows, pg] = await Promise.all([
+          const [eventRows, pg, selectedRecipients] = await Promise.all([
             window.maigun.listEvents(selectedCampaignId),
-            window.maigun.getCampaignProgress(selectedCampaignId)
+            window.maigun.getCampaignProgress(selectedCampaignId),
+            window.maigun.listRecipients(selectedCampaignId)
           ])
-          setEvents(eventRows)
+
+          const selectedRecipientEmails = new Set(
+            (Array.isArray(selectedRecipients) ? selectedRecipients : [])
+              .map((entry: any) => normalizeEmail(entry?.email))
+              .filter(Boolean)
+          )
+
+          let remoteEventRows: any[] = []
+          try {
+            const remote = await apiClient.getCampaignEvents(selectedCampaignId)
+            remoteEventRows = Array.isArray(remote) ? remote.map(normalizeRemoteEvent) : []
+            if (!hasRealWebhookEvent(remoteEventRows) && selectedRecipientEmails.size > 0) {
+              const recoveredRows = await fetchRecoveredHostedEventsForRecipients(selectedRecipientEmails)
+              remoteEventRows = mergeEventsUnique(remoteEventRows, recoveredRows)
+            }
+          } catch {
+            remoteEventRows = []
+          }
+
+          setEvents(mergeEventsUnique(Array.isArray(eventRows) ? eventRows : [], remoteEventRows))
           setProgress(pg)
           setCampaignProgressMap((prev) => ({ ...prev, [selectedCampaignId]: pg }))
           setCampaigns((prev) => prev.map((campaign) => campaign.id === selectedCampaignId
@@ -857,6 +990,7 @@ function App() {
         // polling remains as a fallback
       }
     })
+
     return () => {
       unsubscribe?.()
     }
@@ -896,10 +1030,29 @@ function App() {
       }
 
       const mergedCampaigns = mergeCampaignLists(localCampaignList, remoteCampaignList)
-      const mergedEvents = [...localEventList, ...remoteEventList]
+      const mergedEvents = mergeEventsUnique(localEventList, remoteEventList)
 
       setCampaigns(mergedCampaigns)
       setAllEvents(mergedEvents)
+      if (selectedCampaignId) {
+        const selectedRecipients = await window.maigun.listRecipients(selectedCampaignId)
+        const selectedRecipientEmails = new Set(
+          (Array.isArray(selectedRecipients) ? selectedRecipients : [])
+            .map((entry: any) => normalizeEmail(entry?.email))
+            .filter(Boolean)
+        )
+        const selectedEvents = mergedEvents.filter((entry: any) => {
+          const entryCampaignId = String(entry?.campaignId ?? '')
+          if (entryCampaignId === selectedCampaignId) {
+            return true
+          }
+          if (entryCampaignId.startsWith('recovered-')) {
+            return selectedRecipientEmails.has(normalizeEmail(entry?.recipientEmail))
+          }
+          return false
+        })
+        setEvents(selectedEvents)
+      }
       const progressRows = await Promise.all(mergedCampaigns.map(async (entry: any) => {
         const pg = await window.maigun.getCampaignProgress(entry.id)
         return [entry.id, pg] as const
@@ -1237,10 +1390,10 @@ function App() {
         .filter((event) => event?.payload?._source === 'mailgun-webhook')
         .filter((event) => event?.payload?._simulated !== true)
 
-      const delivered = new Set(webhookEvents.filter((event) => event.type === 'delivered').map((event) => String(event.recipientEmail ?? '').toLowerCase())).size
-      const opened = new Set(webhookEvents.filter((event) => event.type === 'opened').map((event) => String(event.recipientEmail ?? '').toLowerCase())).size
-      const clicked = new Set(webhookEvents.filter((event) => event.type === 'clicked').map((event) => String(event.recipientEmail ?? '').toLowerCase())).size
-      const bounced = new Set(webhookEvents.filter((event) => event.type === 'bounced').map((event) => String(event.recipientEmail ?? '').toLowerCase())).size
+      const delivered = new Set(webhookEvents.filter((event) => canonicalEventType(event.type) === 'delivered').map((event) => String(event.recipientEmail ?? '').toLowerCase())).size
+      const opened = new Set(webhookEvents.filter((event) => canonicalEventType(event.type) === 'opened').map((event) => String(event.recipientEmail ?? '').toLowerCase())).size
+      const clicked = new Set(webhookEvents.filter((event) => canonicalEventType(event.type) === 'clicked').map((event) => String(event.recipientEmail ?? '').toLowerCase())).size
+      const bounced = new Set(webhookEvents.filter((event) => canonicalEventType(event.type) === 'bounced').map((event) => String(event.recipientEmail ?? '').toLowerCase())).size
       const base = Math.max(delivered, pg.sent)
 
       return {
@@ -1280,24 +1433,38 @@ function App() {
   }
 
   const analytics = useMemo(() => {
-    const webhookEvents = events.filter((event) => event?.payload?._source === 'mailgun-webhook')
+    const selectedCampaignEventsFromAll = allEvents.filter((event) => String(event?.campaignId ?? '').trim() === String(selectedCampaignId ?? '').trim())
+    const effectiveEvents = events.length > 0 ? events : selectedCampaignEventsFromAll
+
+    const webhookEventsStrict = effectiveEvents.filter((event) => event?.payload?._source === 'mailgun-webhook')
+    const webhookEvents = webhookEventsStrict.length > 0
+      ? webhookEventsStrict
+      : effectiveEvents.filter((event) => isWebhookMetricEvent(event))
+
     const realWebhookEvents = webhookEvents.filter((event) => event?.payload?._simulated !== true)
     const simulatedWebhookEvents = webhookEvents.filter((event) => event?.payload?._simulated === true)
     const sourceEvents = realWebhookEvents.length > 0 ? realWebhookEvents : simulatedWebhookEvents
 
-    const deliveredRecipients = new Set(sourceEvents.filter((event) => event.type === 'delivered').map((event) => String(event.recipientEmail ?? '').toLowerCase()))
-    const openedRecipients = new Set(sourceEvents.filter((event) => event.type === 'opened').map((event) => String(event.recipientEmail ?? '').toLowerCase()))
-    const clickedRecipients = new Set(sourceEvents.filter((event) => event.type === 'clicked').map((event) => String(event.recipientEmail ?? '').toLowerCase()))
-    const bouncedRecipients = new Set(sourceEvents.filter((event) => event.type === 'bounced').map((event) => String(event.recipientEmail ?? '').toLowerCase()))
+    const deliveredRecipients = new Set(sourceEvents.filter((event) => canonicalEventType(event.type) === 'delivered').map((event) => String(event.recipientEmail ?? '').toLowerCase()))
+    const openedRecipients = new Set(sourceEvents.filter((event) => canonicalEventType(event.type) === 'opened').map((event) => String(event.recipientEmail ?? '').toLowerCase()))
+    const clickedRecipients = new Set(sourceEvents.filter((event) => canonicalEventType(event.type) === 'clicked').map((event) => String(event.recipientEmail ?? '').toLowerCase()))
+    const bouncedRecipients = new Set(sourceEvents.filter((event) => canonicalEventType(event.type) === 'bounced').map((event) => String(event.recipientEmail ?? '').toLowerCase()))
     const delivered = Math.max(deliveredRecipients.size, progress.sent)
     const openRate = delivered ? Math.min(100, Math.floor((openedRecipients.size / delivered) * 100)) : 0
     const clickRate = delivered ? Math.min(100, Math.floor((clickedRecipients.size / delivered) * 100)) : 0
     const bounceRate = delivered ? Math.min(100, Math.floor((bouncedRecipients.size / delivered) * 100)) : 0
     return { openRate, clickRate, bounceRate }
-  }, [events, progress.sent])
+  }, [events, allEvents, selectedCampaignId, progress.sent])
 
   const webhookStatus = useMemo(() => {
-    const webhookEvents = events.filter((event) => event?.payload?._source === 'mailgun-webhook')
+    const selectedCampaignEventsFromAll = allEvents.filter((event) => String(event?.campaignId ?? '').trim() === String(selectedCampaignId ?? '').trim())
+    const effectiveEvents = events.length > 0 ? events : selectedCampaignEventsFromAll
+
+    const webhookEventsStrict = effectiveEvents.filter((event) => event?.payload?._source === 'mailgun-webhook')
+    const webhookEvents = webhookEventsStrict.length > 0
+      ? webhookEventsStrict
+      : effectiveEvents.filter((event) => isWebhookMetricEvent(event))
+
     const realWebhookEvents = webhookEvents.filter((event) => event?.payload?._simulated !== true)
     const simulatedWebhookEvents = webhookEvents.filter((event) => event?.payload?._simulated === true)
     const last = realWebhookEvents[0] ?? webhookEvents[0]
@@ -1308,7 +1475,7 @@ function App() {
       lastType: last?.type ? String(last.type) : '',
       lastRecipient: last?.recipientEmail ? String(last.recipientEmail) : ''
     }
-  }, [events])
+  }, [events, allEvents, selectedCampaignId])
 
   if (!isAuthenticated && authMode === 'loading') {
     return (
@@ -1469,7 +1636,7 @@ function App() {
                   {webhookStatus.simulatedCount > 0 ? <div className="muted">Simulated events: {webhookStatus.simulatedCount} (excluded from analytics)</div> : null}
                   <div className="row wrap" style={{ marginTop: 8 }}>
                     <button className="button secondary" onClick={() => void simulateWebhookEvent()} disabled={!selectedCampaignId}>Simulate webhook event</button>
-                    <span className="muted">Endpoint: /webhooks/mailgun (port {webhookPort})</span>
+                    <span className="muted">Endpoint: {webhookEndpoint}</span>
                   </div>
                 </div>
               </div>
