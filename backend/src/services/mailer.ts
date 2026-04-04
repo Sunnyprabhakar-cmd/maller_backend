@@ -17,8 +17,8 @@ export class MailgunService {
   private baseUrl: string
 
   constructor() {
-    this.apiKey = process.env.MAILGUN_API_KEY || ''
-    this.domain = process.env.MAILGUN_DOMAIN || ''
+    this.apiKey = process.env.MAILGUN_API_KEY || process.env.MAIL_API_KEY || ''
+    this.domain = process.env.MAILGUN_DOMAIN || process.env.MAIL_DOMAIN || ''
     this.baseUrl = `https://api.mailgun.net/v3/${this.domain}`
 
     if (!this.apiKey || !this.domain) {

@@ -1,7 +1,7 @@
 // WebSocket client for realtime events
 import { io, Socket } from 'socket.io-client'
 
-const DEFAULT_WS_URL = process.env.REACT_APP_WS_URL || 'http://localhost:3000'
+const DEFAULT_WS_URL = process.env.REACT_APP_WS_URL || 'https://maller-backend-1.onrender.com'
 
 export class WebSocketClient {
   private socket: Socket | null = null

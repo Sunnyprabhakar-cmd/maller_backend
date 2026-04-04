@@ -35,27 +35,28 @@ This guide walks you through deploying it to Render with PostgreSQL database.
    Start Command: npm start
    Plan: Free
    ```
-5. **Add Environment Variables** (click "Add From .env"):
+5. **Add Environment Variables**:
    ```
    NODE_ENV = production
    PORT = 3000
    DATABASE_URL = [PASTE FROM STEP 1]
-   MAIL_API_KEY = [YOUR MAILGUN API KEY]
-   MAIL_DOMAIN = [YOUR MAILGUN DOMAIN]
-   API_AUTH_TOKEN = [GENERATE: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"]
-   WEBHOOK_URL = https://maller-backend-xxxxx.onrender.com/api/webhooks
+   MAILGUN_API_KEY = [YOUR MAILGUN API KEY]
+   MAILGUN_WEBHOOK_SIGNING_KEY = [MAILGUN Signing Key from domain settings]
+   MAILGUN_DOMAIN = [YOUR MAILGUN DOMAIN]
+   API_TOKEN = [GENERATE: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"]
+   WEBHOOK_URL = https://maller-backend-1.onrender.com/api/webhooks
    ELECTRON_ORIGIN = *
    ```
 6. Click **Create Web Service**
 7. **Wait 5-10 minutes** for the first deployment
-8. Check dashboard for your service URL: `https://maller-backend-XXXXX.onrender.com`
+8. Check dashboard for your service URL (current live URL): `https://maller-backend-1.onrender.com`
 
 ### Step 3: Update Mailgun Webhooks
 1. Go to **Mailgun Dashboard** → **Sending** → **Webhooks**
 2. Click **Add Webhook**
 3. Fill in:
    ```
-   URL: https://maller-backend-XXXXX.onrender.com/api/webhooks
+   URL: https://maller-backend-1.onrender.com/api/webhooks
    Events: All (All the following)
    ```
 4. Click **Save**
@@ -63,9 +64,9 @@ This guide walks you through deploying it to Render with PostgreSQL database.
 ### Step 4: Update Maigun Electron App
 In your Maigun Electron app, create `.env.local`:
 ```
-REACT_APP_API_URL=https://maller-backend-XXXXX.onrender.com/api
-REACT_APP_API_TOKEN=[same API_AUTH_TOKEN from step 2]
-REACT_APP_WS_URL=https://maller-backend-XXXXX.onrender.com
+REACT_APP_API_URL=https://maller-backend-1.onrender.com/api
+REACT_APP_API_TOKEN=[GENERATE: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"]
+REACT_APP_WS_URL=https://maller-backend-1.onrender.com
 ```
 
 Run the Electron app:
@@ -89,9 +90,10 @@ npm run dev
 | Variable | Format | Where to Get |
 |----------|--------|--------------|
 | `DATABASE_URL` | `postgresql://user:pass@host/db` | Render PostgreSQL → Connection String |
-| `MAILGUN_KEY` | `key-xxxxx` | Mailgun → Account → API Keys → Private Key |
+| `MAILGUN_API_KEY` | `key-xxxxx` | Mailgun → Account → API Keys → Private Key |
+| `MAILGUN_WEBHOOK_SIGNING_KEY` | alpha-numeric signing key | Mailgun → Sending → Domains → (your domain) → Webhooks → Signing Key |
 | `MAILGUN_DOMAIN` | `yourdomain.mailgun.org` | Mailgun → Domains → (Your verified domain) |
-| `API_AUTH_TOKEN` | random 64-char | Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
+| `API_TOKEN` | random 64-char | Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | `WEBHOOK_URL` | `https://your-service.onrender.com/api/webhooks` | Render → Settings → Service URL |
 
 ---
@@ -102,11 +104,11 @@ Your backend exposes these endpoints (all require Bearer token):
 
 ```bash
 # Test health
-curl https://maller-backend-XXXXX.onrender.com/health
+curl https://maller-backend-1.onrender.com/health
 
 # Create campaign
 POST /api/campaigns
-Header: Authorization: Bearer YOUR_API_AUTH_TOKEN
+Header: Authorization: Bearer YOUR_API_TOKEN
 
 # Send test email
 POST /api/campaigns/{id}/send-test
@@ -131,7 +133,7 @@ GET /api/campaigns
 ### Webhooks not received
 1. Verify webhook URL in Mailgun matches your Render service URL exactly
 2. Check Render logs for 401 errors (token validation)
-3. Ensure `API_AUTH_TOKEN` is set correctly
+3. Ensure `API_TOKEN` is set correctly
 
 ### WebSocket connection fails
 1. Check browser console for WebSocket errors
@@ -156,7 +158,7 @@ GET /api/campaigns
 
 **Monitor API Health:**
 ```bash
-curl https://maller-backend-XXXXX.onrender.com/health
+curl https://maller-backend-1.onrender.com/health
 ```
 
 ---
@@ -217,7 +219,7 @@ git push origin main
 
 ---
 
-**Your Backend URL:** 🔗 https://maller-backend-XXXXX.onrender.com
+**Your Backend URL:** 🔗 https://maller-backend-1.onrender.com
 
 **GitHub Repository:** 🔗 https://github.com/Sunnyprabhakar-cmd/maller_backend
 

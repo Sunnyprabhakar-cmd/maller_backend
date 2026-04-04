@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 
-const VALID_TOKEN = process.env.API_TOKEN || 'dev-token-12345'
+const VALID_TOKEN = process.env.API_TOKEN || process.env.API_AUTH_TOKEN || 'dev-token-12345'
 
 export function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization

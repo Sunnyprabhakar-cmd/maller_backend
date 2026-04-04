@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import type { Campaign } from '../types.js'
 import type { StorageService } from './storage.js'
 
 type MailgunEventData = {
@@ -11,8 +12,12 @@ type MailgunEventData = {
     token?: string
     signature?: string
   }
+  message?: {
+    headers?: Record<string, unknown>
+  }
   'user-variables'?: Record<string, unknown>
   user_variables?: Record<string, unknown>
+  variables?: Record<string, unknown>
 }
 
 type ParsedWebhook = {
@@ -88,6 +93,106 @@ function parseCampaignId(value: unknown): string | undefined {
   return str || undefined
 }
 
+function pickCampaignId(source: unknown): string | undefined {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    return undefined
+  }
+
+  const record = source as Record<string, unknown>
+  const candidates = [
+    record.campaign_id,
+    record.campaignId,
+    record.campaignID,
+    record['v:campaign_id'],
+    record['v:campaignId'],
+    record['v:campaignID']
+  ]
+
+  for (const candidate of candidates) {
+    const campaignId = parseCampaignId(candidate)
+    if (campaignId) {
+      return campaignId
+    }
+  }
+
+  return undefined
+}
+
+function extractCampaignId(eventData: MailgunEventData | undefined, payload: Record<string, unknown>): string | undefined {
+  const fromEventUserVariables = pickCampaignId(eventData?.['user-variables'] ?? eventData?.user_variables)
+  if (fromEventUserVariables) {
+    return fromEventUserVariables
+  }
+
+  const fromEventVariables = pickCampaignId(eventData?.variables)
+  if (fromEventVariables) {
+    return fromEventVariables
+  }
+
+  const fromTopLevelCustom = pickCampaignId(payload)
+  if (fromTopLevelCustom) {
+    return fromTopLevelCustom
+  }
+
+  const fromTopLevelVariables = pickCampaignId(payload.variables)
+  if (fromTopLevelVariables) {
+    return fromTopLevelVariables
+  }
+
+  const headers = eventData?.message?.headers
+  const headerVarsRaw = headers?.['X-Mailgun-Variables'] ?? headers?.['x-mailgun-variables']
+  if (typeof headerVarsRaw === 'string') {
+    try {
+      const headerVars = JSON.parse(headerVarsRaw) as unknown
+      const fromHeaderVars = pickCampaignId(headerVars)
+      if (fromHeaderVars) {
+        return fromHeaderVars
+      }
+    } catch {
+      // Ignore malformed JSON header
+    }
+  }
+
+  const fromEventPayload = pickCampaignId(eventData)
+  if (fromEventPayload) {
+    return fromEventPayload
+  }
+
+  return undefined
+}
+
+function buildPlaceholderCampaign(campaignId: string, email: string): Campaign {
+  const now = new Date().toISOString()
+  const suffix = campaignId.slice(0, 8)
+
+  return {
+    id: campaignId,
+    name: `Recovered campaign ${suffix}`,
+    isNewsletter: false,
+    newsletterEdition: '',
+    subject: `Webhook activity for ${email || 'unknown recipient'}`,
+    htmlBody: '<p>Webhook activity received.</p>',
+    textBody: 'Webhook activity received.',
+    senderEmail: '',
+    replyToEmail: '',
+    companyName: 'Mailgun',
+    companyAddress: '',
+    companyContact: '',
+    contactNumber: '',
+    footerContent: '',
+    cidAssets: [],
+    status: 'sent',
+    createdAt: now,
+    updatedAt: now
+  }
+}
+
+function buildRecoveredCampaignId(email: string): string {
+  const normalized = email.trim().toLowerCase()
+  const digest = createHmac('sha256', 'mailgun-webhook-recovery').update(normalized).digest('hex').slice(0, 24)
+  return `recovered-${digest}`
+}
+
 function resolveCampaignId(storage: StorageService, explicitCampaignId: string | undefined, recipientEmail: string): string | undefined {
   if (explicitCampaignId?.trim()) {
     return explicitCampaignId.trim()
@@ -121,8 +226,7 @@ function parsePayload(body: string, contentType: string | undefined): ParsedWebh
         return undefined
       }
       const eventData = eventDataObj as unknown as MailgunEventData
-      const vars = (eventData['user-variables'] ?? eventData.user_variables ?? {}) as Record<string, unknown>
-      const campaignId = parseCampaignId(vars.campaignId)
+      const campaignId = extractCampaignId(eventData, eventDataObj)
       const email = String(eventData.recipient ?? '')
       const event = String(eventData.event ?? '')
       const signature = eventData.signature
@@ -173,8 +277,7 @@ function parsePayload(body: string, contentType: string | undefined): ParsedWebh
   }
   const eventData = (parsed['event-data'] ?? parsed.event_data) as MailgunEventData | undefined
   if (eventData) {
-    const vars = (eventData['user-variables'] ?? eventData.user_variables ?? {}) as Record<string, unknown>
-    const campaignId = parseCampaignId(vars.campaignId)
+    const campaignId = extractCampaignId(eventData, parsed)
     const email = String(eventData.recipient ?? '')
     const event = String(eventData.event ?? '')
     const signature = eventData.signature
@@ -193,7 +296,7 @@ function parsePayload(body: string, contentType: string | undefined): ParsedWebh
     }
   }
 
-  const campaignId = parseCampaignId(parsed.campaignId)
+  const campaignId = extractCampaignId(undefined, parsed) ?? parseCampaignId(parsed.campaignId)
   const email = String(parsed.email ?? parsed.recipient ?? '')
   const event = String(parsed.event ?? '')
 
@@ -264,11 +367,10 @@ function createServerForPort(storage: StorageService, options?: WebhookStartOpti
           return
         }
 
-        const campaignId = resolveCampaignId(storage, parsed.campaignId, email)
-        if (!campaignId) {
-          res.statusCode = 202
-          res.end('campaign not found')
-          return
+        const campaignId = resolveCampaignId(storage, parsed.campaignId, email) ?? buildRecoveredCampaignId(email)
+
+        if (!storage.listCampaigns().some((campaign) => campaign.id === campaignId)) {
+          storage.saveCampaign(buildPlaceholderCampaign(campaignId, email))
         }
 
         const createdAt = new Date().toISOString()

@@ -1,5 +1,5 @@
 // API Client for Electron app to communicate with backend
-const DEFAULT_API_URL = process.env.REACT_APP_API_URL || 'http://localhost:3000/api'
+const DEFAULT_API_URL = process.env.REACT_APP_API_URL || 'https://maller-backend-1.onrender.com/api'
 const API_TOKEN = process.env.REACT_APP_API_TOKEN || 'dev-token-12345'
 
 interface ApiOptions {

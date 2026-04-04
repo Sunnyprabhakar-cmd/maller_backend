@@ -1,6 +1,7 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
+import { apiClient } from './api-client'
 import './styles.css'
 
 function svgToDataUri(svg: string): string {
@@ -112,6 +113,88 @@ type Progress = {
   suppressed: number
   inProgress: number
   percent: number
+}
+
+function deriveCampaignStatus(baseStatus: string | undefined, progress: Progress | undefined): string {
+  if (!progress || progress.total <= 0) {
+    return String(baseStatus ?? 'draft')
+  }
+
+  const processed = progress.sent + progress.failed + progress.suppressed
+  if (processed >= progress.total) {
+    if (progress.failed > 0 && progress.sent === 0) {
+      return 'failed'
+    }
+    return 'sent'
+  }
+
+  if (progress.inProgress > 0 || processed > 0) {
+    return 'sending'
+  }
+
+  if (progress.queued > 0) {
+    return 'queued'
+  }
+
+  return String(baseStatus ?? 'draft')
+}
+
+function normalizeRemoteEvent(event: any): any {
+  return {
+    id: String(event?.id ?? ''),
+    campaignId: String(event?.campaignId ?? ''),
+    recipientEmail: String(event?.email ?? event?.recipientEmail ?? ''),
+    type: String(event?.event ?? event?.type ?? 'failed'),
+    payload: {
+      ...(event?.data ?? event?.payload ?? {}),
+      _source: 'mailgun-webhook'
+    },
+    createdAt: event?.timestamp ?? event?.createdAt ?? new Date().toISOString()
+  }
+}
+
+function mergeCampaignLists(localCampaigns: Campaign[], remoteCampaigns: any[]) {
+  const merged = new Map<string, Campaign>()
+  for (const campaign of localCampaigns) {
+    merged.set(campaign.id, campaign)
+  }
+  for (const campaign of remoteCampaigns) {
+    const existing = merged.get(String(campaign?.id ?? ''))
+    if (existing) {
+      merged.set(existing.id, {
+        ...existing,
+        name: campaign?.name ?? existing.name,
+        subject: campaign?.subject ?? existing.subject,
+        status: campaign?.status ?? existing.status,
+        updatedAt: campaign?.updatedAt ? String(campaign.updatedAt) : existing.updatedAt,
+        createdAt: campaign?.createdAt ? String(campaign.createdAt) : existing.createdAt
+      })
+    } else if (campaign?.id) {
+      merged.set(String(campaign.id), {
+        id: String(campaign.id),
+        name: String(campaign.name ?? 'Recovered campaign'),
+        isNewsletter: false,
+        newsletterEdition: '',
+        subject: String(campaign.subject ?? ''),
+        htmlBody: '<p>Recovered campaign.</p>',
+        textBody: 'Recovered campaign.',
+        senderEmail: '',
+        replyToEmail: '',
+        companyName: 'Mailgun',
+        headerCompanyName: 'Mailgun',
+        footerCompanyName: 'Mailgun',
+        companyAddress: '',
+        companyContact: '',
+        contactNumber: '',
+        footerContent: '',
+        cidAssets: [],
+        status: String(campaign.status ?? 'sent'),
+        createdAt: campaign.createdAt ? String(campaign.createdAt) : new Date().toISOString(),
+        updatedAt: campaign.updatedAt ? String(campaign.updatedAt) : new Date().toISOString()
+      })
+    }
+  }
+  return [...merged.values()]
 }
 
 const emptyCampaign: Partial<Campaign> = {
@@ -723,6 +806,16 @@ function App() {
       setAllEvents(allEventRows)
       setProgress(pg)
       setCampaignProgressMap((prev) => ({ ...prev, [selectedCampaignId]: pg }))
+      setCampaigns((prev) => prev.map((campaign) => campaign.id === selectedCampaignId
+        ? { ...campaign, status: deriveCampaignStatus(campaign.status, pg) }
+        : campaign
+      ))
+      setCurrent((prev) => {
+        if (String(prev.id ?? '') !== selectedCampaignId) {
+          return prev
+        }
+        return { ...prev, status: deriveCampaignStatus(String(prev.status ?? ''), pg) }
+      })
     }
     void tick()
     const timer = setInterval(() => {
@@ -747,6 +840,16 @@ function App() {
           setEvents(eventRows)
           setProgress(pg)
           setCampaignProgressMap((prev) => ({ ...prev, [selectedCampaignId]: pg }))
+          setCampaigns((prev) => prev.map((campaign) => campaign.id === selectedCampaignId
+            ? { ...campaign, status: deriveCampaignStatus(campaign.status, pg) }
+            : campaign
+          ))
+          setCurrent((prev) => {
+            if (String(prev.id ?? '') !== selectedCampaignId) {
+              return prev
+            }
+            return { ...prev, status: deriveCampaignStatus(String(prev.status ?? ''), pg) }
+          })
         }
         const allEventRows = await window.maigun.listEvents()
         setAllEvents(Array.isArray(allEventRows) ? allEventRows : [])
@@ -773,9 +876,31 @@ function App() {
         window.maigun.getDraft(),
         window.maigun.listEvents()
       ])
-      setCampaigns(Array.isArray(loadedCampaigns) ? loadedCampaigns : [])
-      setAllEvents(Array.isArray(loadedAllEvents) ? loadedAllEvents : [])
-      const progressRows = await Promise.all((loadedCampaigns ?? []).map(async (entry: any) => {
+      const localCampaignList = Array.isArray(loadedCampaigns) ? loadedCampaigns : []
+      const localEventList = Array.isArray(loadedAllEvents) ? loadedAllEvents : []
+
+      let remoteCampaignList: any[] = []
+      let remoteEventList: any[] = []
+      try {
+        remoteCampaignList = await apiClient.getCampaigns()
+        if (Array.isArray(remoteCampaignList) && remoteCampaignList.length > 0) {
+          const remoteEventRows = await Promise.all(remoteCampaignList.map(async (entry: any) => {
+            const events = await apiClient.getCampaignEvents(String(entry.id))
+            return Array.isArray(events) ? events.map(normalizeRemoteEvent) : []
+          }))
+          remoteEventList = remoteEventRows.flat()
+        }
+      } catch {
+        remoteCampaignList = []
+        remoteEventList = []
+      }
+
+      const mergedCampaigns = mergeCampaignLists(localCampaignList, remoteCampaignList)
+      const mergedEvents = [...localEventList, ...remoteEventList]
+
+      setCampaigns(mergedCampaigns)
+      setAllEvents(mergedEvents)
+      const progressRows = await Promise.all(mergedCampaigns.map(async (entry: any) => {
         const pg = await window.maigun.getCampaignProgress(entry.id)
         return [entry.id, pg] as const
       }))
@@ -788,8 +913,8 @@ function App() {
         setAuthMode('setup')
       }
       setCurrent({ ...emptyCampaign, ...(loadedDraft ?? {}) })
-      if (loadedCampaigns?.[0] && !selectedCampaignId) {
-        setSelectedCampaignId(loadedCampaigns[0].id)
+      if (mergedCampaigns?.[0] && !selectedCampaignId) {
+        setSelectedCampaignId(mergedCampaigns[0].id)
       }
     } catch (error) {
       setAuthError(`Unable to load configuration: ${(error as Error).message}`)
@@ -1081,9 +1206,9 @@ function App() {
       return {
         title: 'How To Use Settings',
         lines: [
-          'Configure Mailgun, webhook secret, sender profiles, and image hosting.',
-          'Click Save settings and verify success message.',
-          'Create/maintain app username and password for login.'
+          'Use this page for app login credentials and sender profiles only.',
+          'Backend credentials (Mailgun/webhook) are managed on Render.',
+          'Click Save settings and verify success message.'
         ]
       }
     }
@@ -1121,7 +1246,7 @@ function App() {
       return {
         id: campaign.id,
         name: campaign.name,
-        status: campaign.status,
+        status: deriveCampaignStatus(campaign.status, pg),
         updatedAt: campaign.updatedAt,
         total: pg.total,
         sent: pg.sent,
@@ -1739,32 +1864,8 @@ function App() {
           <section className="card">
             <h2>Settings</h2>
             <div className="grid">
-              <div><label>Mailgun API key</label><input value={settings.mailgunApiKey} onChange={(event) => setSettings({ ...settings, mailgunApiKey: event.target.value })} /></div>
-              <div><label>Mailgun domain</label><input value={settings.mailgunDomain} onChange={(event) => setSettings({ ...settings, mailgunDomain: event.target.value })} /></div>
-              <div><label>Webhook secret</label><input value={settings.webhookSecret} onChange={(event) => setSettings({ ...settings, webhookSecret: event.target.value })} /></div>
-              <div><label>Retry attempts</label><input type="number" value={settings.retryAttempts} onChange={(event) => setSettings({ ...settings, retryAttempts: Number(event.target.value) })} /></div>
-              <div><label>Emails per second</label><input type="number" value={Math.max(1, Math.round(settings.throttlePerMinute / 60))} onChange={(event) => setSettings({ ...settings, throttlePerMinute: Number(event.target.value) * 60 })} /></div>
-              <div><label>App password</label><input type="password" value={settings.appPassword} onChange={(event) => setSettings({ ...settings, appPassword: event.target.value })} /></div>
               <div><label>App username</label><input value={settings.appUsername} onChange={(event) => setSettings({ ...settings, appUsername: event.target.value })} /></div>
-              <div>
-                <label>Image provider</label>
-                <select value={settings.imageUploadProvider} onChange={(event) => setSettings({ ...settings, imageUploadProvider: event.target.value as Settings['imageUploadProvider'] })}>
-                  <option value="none">None</option>
-                  <option value="imgbb">ImgBB</option>
-                </select>
-              </div>
-              <div><label>Image API key</label><input value={settings.imageUploadApiKey} onChange={(event) => setSettings({ ...settings, imageUploadApiKey: event.target.value })} /></div>
-              <div>
-                <label>Use Google Drive for uploads</label>
-                <select value={settings.googleDriveEnabled ? 'yes' : 'no'} onChange={(event) => setSettings({ ...settings, googleDriveEnabled: event.target.value === 'yes' })}>
-                  <option value="no">No</option>
-                  <option value="yes">Yes</option>
-                </select>
-              </div>
-              <div><label>Google Client ID</label><input value={settings.googleDriveClientId} onChange={(event) => setSettings({ ...settings, googleDriveClientId: event.target.value })} /></div>
-              <div><label>Google Client Secret</label><input value={settings.googleDriveClientSecret} onChange={(event) => setSettings({ ...settings, googleDriveClientSecret: event.target.value })} /></div>
-              <div><label>Google Refresh Token</label><input value={settings.googleDriveRefreshToken} onChange={(event) => setSettings({ ...settings, googleDriveRefreshToken: event.target.value })} /></div>
-              <div><label>Google Drive Folder ID (optional)</label><input value={settings.googleDriveFolderId} onChange={(event) => setSettings({ ...settings, googleDriveFolderId: event.target.value })} /></div>
+              <div><label>App password</label><input type="password" value={settings.appPassword} onChange={(event) => setSettings({ ...settings, appPassword: event.target.value })} /></div>
               <div>
                 <label>Add sender profile</label>
                 <div className="row">
@@ -1793,6 +1894,11 @@ function App() {
                   ))}
                 </div>
               </div>
+            </div>
+            <div className="card" style={{ marginTop: 12 }}>
+              <h3>Hosted backend mode</h3>
+              <div className="muted" style={{ marginBottom: 8 }}>Mailgun, webhook, and provider credentials are managed on the backend service (Render).</div>
+              <div className="muted">Frontend only needs login fields and sender profile convenience values.</div>
             </div>
             <div className="row wrap" style={{ marginTop: 12 }}>
               <button className="button" onClick={async () => {
