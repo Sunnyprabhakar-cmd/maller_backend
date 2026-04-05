@@ -1,0 +1,106 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Campaign {
+  id                    String   @id @default(cuid())
+  name                  String
+  subject               String
+  status                String   @default("draft")
+  template              String   @db.Text
+  htmlBody              String?  @db.Text
+  textBody              String?  @db.Text
+  csvData               String?  @db.Text
+  isNewsletter          Boolean  @default(false)
+  newsletterEdition     String   @default("")
+  senderEmail           String?
+  replyToEmail          String?
+  companyName           String?
+  headerCompanyName     String?
+  footerCompanyName     String?
+  companyAddress        String?
+  companyContact        String?
+  contactNumber         String?
+  footerContent         String?  @db.Text
+  sourceType            String   @default("cid") // legacy banner source type
+  imageUrl              String?
+  imageCid              String?
+  logoSourceType        String?
+  logoUrl               String?
+  logoLinkUrl           String?
+  logoCid               String?
+  bannerSourceType      String?
+  bannerUrl             String?
+  bannerLinkUrl         String?
+  bannerCid             String?
+  inlineImageSourceType String?
+  inlineImageUrl        String?
+  inlineImageLinkUrl    String?
+  inlineImageCid        String?
+  ctaUrl                String?
+  facebookUrl           String?
+  instagramUrl          String?
+  xUrl                  String?
+  linkedinUrl           String?
+  whatsappUrl           String?
+  youtubeUrl            String?
+  socialIconSize        Int      @default(32)
+  webhookUrl            String?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  recipients CampaignRecipient[]
+  events     WebhookEvent[]
+
+  @@index([createdAt])
+}
+
+model CampaignRecipient {
+  id         String   @id @default(cuid())
+  campaignId String
+  email      String
+  name       String?
+  data       Json?    // CSV row data for template interpolation
+
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, email])
+  @@index([campaignId])
+  @@index([email])
+}
+
+model WebhookEvent {
+  id         String   @id @default(cuid())
+  campaignId String
+  email      String
+  event      String   // "delivered", "clicked", "opened", "failed", etc.
+  timestamp  DateTime @default(now())
+  data       Json?    // Raw Mailgun event data
+
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+  @@index([email])
+  @@index([event])
+  @@index([timestamp])
+}
+
+model ApiToken {
+  id        String   @id @default(cuid())
+  name      String
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  lastUsedAt DateTime?
+
+  @@index([token])
+}

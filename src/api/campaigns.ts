@@ -1,0 +1,471 @@
+import { Router, Request, Response } from 'express'
+import { authMiddleware } from '../middleware/auth.js'
+import { buildEmailHtml, buildTextFallback } from '../services/render.js'
+import mailer from '../services/mailer.js'
+import { PrismaClient } from '@prisma/client'
+
+const router = Router()
+
+function resolveOpenTrackingUrl(): string {
+  const configured = String(process.env.WEBHOOK_URL || '').trim().replace(/\/+$/, '')
+  const renderHost = process.env.RENDER_EXTERNAL_HOSTNAME
+    ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`
+    : 'http://localhost:3000'
+
+  if (!configured) {
+    return `${renderHost}/api/webhooks/track/open`
+  }
+
+  // Backward-compatible normalization for older WEBHOOK_URL values.
+  if (configured.endsWith('/track/open')) {
+    return configured
+  }
+  if (configured.endsWith('/api/webhooks') || configured.endsWith('/webhooks')) {
+    return `${configured}/track/open`
+  }
+
+  return `${configured}/track/open`
+}
+
+// Middleware
+router.use(authMiddleware)
+
+function toText(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback
+}
+
+function toNullableText(value: unknown): string | null {
+  const text = typeof value === 'string' ? value.trim() : ''
+  return text ? text : null
+}
+
+function toNullableSourceType(value: unknown): 'cid' | 'url' | null {
+  return value === 'cid' || value === 'url' ? value : null
+}
+
+function toBoolean(value: unknown, fallback = false): boolean {
+  return typeof value === 'boolean' ? value : fallback
+}
+
+function toSocialIconSize(value: unknown): number {
+  const size = Number(value)
+  return [28, 32, 36].includes(size) ? size : 32
+}
+
+function buildCampaignRecord(input: Record<string, unknown>) {
+  const htmlBody = toText(input.htmlBody, toText(input.template, '<p>Hello {{name}}</p>'))
+  const bannerSourceType = toNullableSourceType(input.bannerSourceType) || toNullableSourceType(input.sourceType) || 'url'
+  const bannerUrl = toNullableText(input.bannerUrl) ?? toNullableText(input.imageUrl)
+  const bannerCid = toNullableText(input.bannerCid) ?? toNullableText(input.imageCid)
+
+  return {
+    name: toText(input.name, 'Untitled Campaign'),
+    subject: toText(input.subject, ''),
+    status: toText(input.status, 'draft'),
+    template: htmlBody,
+    htmlBody,
+    textBody: toNullableText(input.textBody),
+    isNewsletter: toBoolean(input.isNewsletter, false),
+    newsletterEdition: toText(input.newsletterEdition, ''),
+    senderEmail: toNullableText(input.senderEmail),
+    replyToEmail: toNullableText(input.replyToEmail),
+    companyName: toNullableText(input.companyName),
+    headerCompanyName: toNullableText(input.headerCompanyName),
+    footerCompanyName: toNullableText(input.footerCompanyName),
+    companyAddress: toNullableText(input.companyAddress),
+    companyContact: toNullableText(input.companyContact),
+    contactNumber: toNullableText(input.contactNumber),
+    footerContent: toNullableText(input.footerContent),
+    sourceType: bannerSourceType,
+    imageUrl: bannerUrl,
+    imageCid: bannerCid,
+    logoSourceType: toNullableSourceType(input.logoSourceType),
+    logoUrl: toNullableText(input.logoUrl),
+    logoLinkUrl: toNullableText(input.logoLinkUrl),
+    logoCid: toNullableText(input.logoCid),
+    bannerSourceType,
+    bannerUrl,
+    bannerLinkUrl: toNullableText(input.bannerLinkUrl),
+    bannerCid,
+    inlineImageSourceType: toNullableSourceType(input.inlineImageSourceType),
+    inlineImageUrl: toNullableText(input.inlineImageUrl),
+    inlineImageLinkUrl: toNullableText(input.inlineImageLinkUrl),
+    inlineImageCid: toNullableText(input.inlineImageCid),
+    ctaUrl: toNullableText(input.ctaUrl),
+    facebookUrl: toNullableText(input.facebookUrl),
+    instagramUrl: toNullableText(input.instagramUrl),
+    xUrl: toNullableText(input.xUrl),
+    linkedinUrl: toNullableText(input.linkedinUrl),
+    whatsappUrl: toNullableText(input.whatsappUrl),
+    youtubeUrl: toNullableText(input.youtubeUrl),
+    socialIconSize: toSocialIconSize(input.socialIconSize),
+    webhookUrl: resolveOpenTrackingUrl()
+  }
+}
+
+function buildCampaignCreateRecord(input: Record<string, unknown>) {
+  const base = buildCampaignRecord(input) as Record<string, unknown>
+  const explicitId = toNullableText(input.id)
+  if (explicitId) {
+    base.id = explicitId
+  }
+  return base
+}
+
+function buildEmailVariables(campaign: any, recipient: { email: string; name?: string | null; data?: any }) {
+  return {
+    ...(recipient.data && typeof recipient.data === 'object' ? recipient.data : {}),
+    name: recipient.name || '',
+    email: recipient.email,
+    campaign_id: campaign.id,
+    campaign_name: campaign.name,
+    company_name: campaign.companyName || '',
+    header_company_name: campaign.headerCompanyName || campaign.companyName || '',
+    footer_company_name: campaign.footerCompanyName || campaign.companyName || '',
+    company_address: campaign.companyAddress || '',
+    company_contact: campaign.companyContact || '',
+    contact_number: campaign.contactNumber || '',
+    cta_url: campaign.ctaUrl || '',
+    unsubscribe_url: recipient.data?.unsubscribe_url || '#',
+    offer_code: recipient.data?.offer_code || '',
+    whatsapp_url: campaign.whatsappUrl || '',
+    youtube_url: campaign.youtubeUrl || ''
+  }
+}
+
+// Create campaign
+router.post('/', async (req: Request, res: Response) => {
+  try {
+    const input = (req.body ?? {}) as Record<string, unknown>
+    const prisma = (req as any).prisma as PrismaClient
+
+    const campaign = await prisma.campaign.create({
+      data: buildCampaignCreateRecord(input) as any
+    })
+
+    res.json(campaign)
+  } catch (error: any) {
+    res.status(400).json({ error: error.message })
+  }
+})
+
+// Update campaign
+router.put('/:id', async (req: Request, res: Response) => {
+  try {
+    const input = (req.body ?? {}) as Record<string, unknown>
+    const prisma = (req as any).prisma as PrismaClient
+
+    const existing = await prisma.campaign.findUnique({
+      where: { id: req.params.id },
+      select: { id: true }
+    })
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+
+    const campaign = await prisma.campaign.update({
+      where: { id: req.params.id },
+      data: buildCampaignRecord({ ...input, id: req.params.id }) as any
+    })
+
+    res.json(campaign)
+  } catch (error: any) {
+    res.status(400).json({ error: error.message })
+  }
+})
+
+// Get all campaigns
+router.get('/', async (req: Request, res: Response) => {
+  try {
+    const prisma = (req as any).prisma as PrismaClient
+    const campaigns = await prisma.campaign.findMany({
+      include: { recipients: true },
+      orderBy: { createdAt: 'desc' }
+    })
+    res.json(campaigns)
+  } catch (error: any) {
+    res.status(400).json({ error: error.message })
+  }
+})
+
+// Get campaign by ID
+router.get('/:id', async (req: Request, res: Response) => {
+  try {
+    const prisma = (req as any).prisma as PrismaClient
+    const campaign = await prisma.campaign.findUnique({
+      where: { id: req.params.id },
+      include: {
+        recipients: true,
+        events: { orderBy: { timestamp: 'desc' } }
+      }
+    })
+
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+
+    res.json(campaign)
+  } catch (error: any) {
+    res.status(400).json({ error: error.message })
+  }
+})
+
+// Add recipients from CSV
+router.post('/:id/recipients', async (req: Request, res: Response) => {
+  try {
+    const { recipients } = req.body // Array of { email, name, data: {} }
+    const prisma = (req as any).prisma as PrismaClient
+
+    const created = await Promise.all(
+      recipients.map((r: any) =>
+        prisma.campaignRecipient.upsert({
+          where: {
+            campaignId_email: {
+              campaignId: req.params.id,
+              email: r.email
+            }
+          },
+          create: {
+            campaignId: req.params.id,
+            email: r.email,
+            name: r.name,
+            data: r.data
+          },
+          update: {
+            name: r.name,
+            data: r.data
+          }
+        })
+      )
+    )
+
+    res.json({ count: created.length })
+  } catch (error: any) {
+    res.status(400).json({ error: error.message })
+  }
+})
+
+// Send test email
+router.post('/:id/send-test', async (req: Request, res: Response) => {
+  try {
+    const { testEmail } = req.body
+    const prisma = (req as any).prisma as PrismaClient
+    const io = (req as any).io
+
+    const campaign: any = await prisma.campaign.findUnique({
+      where: { id: req.params.id },
+      include: { recipients: true }
+    })
+
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+
+    // Build email HTML
+    const html = buildEmailHtml({
+      template: campaign.template,
+      htmlBody: campaign.htmlBody ?? campaign.template,
+      textBody: campaign.textBody ?? undefined,
+      data: buildEmailVariables(campaign, { email: testEmail, name: 'Test User' }),
+      sourceType: (campaign.sourceType === 'cid' ? 'cid' : 'url') as 'cid' | 'url',
+      imageUrl: campaign.imageUrl ?? undefined,
+      imageCid: campaign.imageCid ?? undefined,
+      logoSourceType: campaign.logoSourceType === 'cid' ? 'cid' : 'url',
+      logoUrl: campaign.logoUrl ?? undefined,
+      logoCid: campaign.logoCid ?? undefined,
+      logoLinkUrl: campaign.logoLinkUrl ?? undefined,
+      bannerSourceType: campaign.bannerSourceType === 'cid' ? 'cid' : 'url',
+      bannerUrl: campaign.bannerUrl ?? undefined,
+      bannerCid: campaign.bannerCid ?? undefined,
+      bannerLinkUrl: campaign.bannerLinkUrl ?? undefined,
+      inlineImageSourceType: campaign.inlineImageSourceType === 'cid' ? 'cid' : 'url',
+      inlineImageUrl: campaign.inlineImageUrl ?? undefined,
+      inlineImageCid: campaign.inlineImageCid ?? undefined,
+      inlineImageLinkUrl: campaign.inlineImageLinkUrl ?? undefined,
+      companyName: campaign.companyName ?? undefined,
+      headerCompanyName: campaign.headerCompanyName ?? undefined,
+      footerCompanyName: campaign.footerCompanyName ?? undefined,
+      companyAddress: campaign.companyAddress ?? undefined,
+      companyContact: campaign.companyContact ?? undefined,
+      contactNumber: campaign.contactNumber ?? undefined,
+      footerContent: campaign.footerContent ?? undefined,
+      ctaUrl: campaign.ctaUrl ?? undefined,
+      facebookUrl: campaign.facebookUrl ?? undefined,
+      instagramUrl: campaign.instagramUrl ?? undefined,
+      xUrl: campaign.xUrl ?? undefined,
+      linkedinUrl: campaign.linkedinUrl ?? undefined,
+      whatsappUrl: campaign.whatsappUrl ?? undefined,
+      youtubeUrl: campaign.youtubeUrl ?? undefined,
+      socialIconSize: campaign.socialIconSize ?? undefined,
+      isNewsletter: campaign.isNewsletter ?? false,
+      newsletterEdition: campaign.newsletterEdition ?? undefined,
+      webhookUrl: campaign.webhookUrl ?? undefined
+    })
+
+    const data = buildEmailVariables(campaign, { email: testEmail, name: 'Test User' })
+
+    // Send via Mailgun
+    const messageId = await mailer.sendEmail({
+      to: testEmail,
+      campaignId: campaign.id,
+      subject: campaign.subject,
+      html,
+      text: buildTextFallback({
+        template: campaign.template,
+        htmlBody: campaign.htmlBody ?? campaign.template,
+        textBody: campaign.textBody ?? undefined,
+        data,
+        companyName: campaign.companyName ?? undefined,
+        headerCompanyName: campaign.headerCompanyName ?? undefined,
+        footerCompanyName: campaign.footerCompanyName ?? undefined,
+        companyAddress: campaign.companyAddress ?? undefined,
+        companyContact: campaign.companyContact ?? undefined,
+        contactNumber: campaign.contactNumber ?? undefined,
+        ctaUrl: campaign.ctaUrl ?? undefined,
+        whatsappUrl: campaign.whatsappUrl ?? undefined,
+        youtubeUrl: campaign.youtubeUrl ?? undefined
+      }),
+      from: campaign.senderEmail || undefined,
+      replyTo: campaign.replyToEmail || undefined
+    })
+
+    // Emit to connected clients
+    io.emit('email:sent', {
+      campaignId: campaign.id,
+      email: testEmail,
+      messageId,
+      timestamp: new Date()
+    })
+
+    res.json({ messageId, sent: true })
+  } catch (error: any) {
+    res.status(400).json({ error: error.message })
+  }
+})
+
+// Send to all recipients
+router.post('/:id/send', async (req: Request, res: Response) => {
+  try {
+    const prisma = (req as any).prisma as PrismaClient
+    const io = (req as any).io
+
+    const campaign: any = await prisma.campaign.findUnique({
+      where: { id: req.params.id },
+      include: { recipients: true }
+    })
+
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaign not found' })
+    }
+
+    let sent = 0
+    let failed = 0
+
+    for (const recipient of campaign.recipients) {
+      try {
+        const html = buildEmailHtml({
+          template: campaign.template,
+          htmlBody: campaign.htmlBody ?? campaign.template,
+          textBody: campaign.textBody ?? undefined,
+          data: buildEmailVariables(campaign, recipient),
+          sourceType: (campaign.sourceType === 'cid' ? 'cid' : 'url') as 'cid' | 'url',
+          imageUrl: campaign.imageUrl ?? undefined,
+          imageCid: campaign.imageCid ?? undefined,
+          logoSourceType: campaign.logoSourceType === 'cid' ? 'cid' : 'url',
+          logoUrl: campaign.logoUrl ?? undefined,
+          logoCid: campaign.logoCid ?? undefined,
+          logoLinkUrl: campaign.logoLinkUrl ?? undefined,
+          bannerSourceType: campaign.bannerSourceType === 'cid' ? 'cid' : 'url',
+          bannerUrl: campaign.bannerUrl ?? undefined,
+          bannerCid: campaign.bannerCid ?? undefined,
+          bannerLinkUrl: campaign.bannerLinkUrl ?? undefined,
+          inlineImageSourceType: campaign.inlineImageSourceType === 'cid' ? 'cid' : 'url',
+          inlineImageUrl: campaign.inlineImageUrl ?? undefined,
+          inlineImageCid: campaign.inlineImageCid ?? undefined,
+          inlineImageLinkUrl: campaign.inlineImageLinkUrl ?? undefined,
+          companyName: campaign.companyName ?? undefined,
+          headerCompanyName: campaign.headerCompanyName ?? undefined,
+          footerCompanyName: campaign.footerCompanyName ?? undefined,
+          companyAddress: campaign.companyAddress ?? undefined,
+          companyContact: campaign.companyContact ?? undefined,
+          contactNumber: campaign.contactNumber ?? undefined,
+          footerContent: campaign.footerContent ?? undefined,
+          ctaUrl: campaign.ctaUrl ?? undefined,
+          facebookUrl: campaign.facebookUrl ?? undefined,
+          instagramUrl: campaign.instagramUrl ?? undefined,
+          xUrl: campaign.xUrl ?? undefined,
+          linkedinUrl: campaign.linkedinUrl ?? undefined,
+          whatsappUrl: campaign.whatsappUrl ?? undefined,
+          youtubeUrl: campaign.youtubeUrl ?? undefined,
+          socialIconSize: campaign.socialIconSize ?? undefined,
+          isNewsletter: campaign.isNewsletter ?? false,
+          newsletterEdition: campaign.newsletterEdition ?? undefined,
+          webhookUrl: campaign.webhookUrl ?? undefined
+        })
+
+        const data = buildEmailVariables(campaign, recipient)
+
+        await mailer.sendEmail({
+          to: recipient.email,
+          recipientName: recipient.name || undefined,
+          campaignId: campaign.id,
+          subject: campaign.subject,
+          html,
+          text: buildTextFallback({
+            template: campaign.template,
+            htmlBody: campaign.htmlBody ?? campaign.template,
+            textBody: campaign.textBody ?? undefined,
+            data,
+            companyName: campaign.companyName ?? undefined,
+            headerCompanyName: campaign.headerCompanyName ?? undefined,
+            footerCompanyName: campaign.footerCompanyName ?? undefined,
+            companyAddress: campaign.companyAddress ?? undefined,
+            companyContact: campaign.companyContact ?? undefined,
+            contactNumber: campaign.contactNumber ?? undefined,
+            ctaUrl: campaign.ctaUrl ?? undefined,
+            whatsappUrl: campaign.whatsappUrl ?? undefined,
+            youtubeUrl: campaign.youtubeUrl ?? undefined
+          }),
+          from: campaign.senderEmail || undefined,
+          replyTo: campaign.replyToEmail || undefined
+        })
+
+        sent++
+        io.emit('email:sent', {
+          campaignId: campaign.id,
+          email: recipient.email,
+          timestamp: new Date()
+        })
+      } catch (error) {
+        failed++
+        io.emit('email:failed', {
+          campaignId: campaign.id,
+          email: recipient.email,
+          error: String(error)
+        })
+      }
+    }
+
+    res.json({ sent, failed, total: campaign.recipients.length })
+  } catch (error: any) {
+    res.status(400).json({ error: error.message })
+  }
+})
+
+// Get campaign events/webhooks
+router.get('/:id/events', async (req: Request, res: Response) => {
+  try {
+    const prisma = (req as any).prisma as PrismaClient
+    const events = await prisma.webhookEvent.findMany({
+      where: { campaignId: req.params.id },
+      orderBy: { timestamp: 'desc' },
+      take: 100
+    })
+    res.json(events)
+  } catch (error: any) {
+    res.status(400).json({ error: error.message })
+  }
+})
+
+export default router
