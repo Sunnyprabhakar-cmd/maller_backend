@@ -13,6 +13,15 @@ interface SendEmailOptions {
   attachments?: Array<{ filename: string; data: string; cid: string }>
 }
 
+function inferInlineContentType(fileName: string): string {
+  const lower = String(fileName || '').toLowerCase()
+  if (lower.endsWith('.png')) return 'image/png'
+  if (lower.endsWith('.gif')) return 'image/gif'
+  if (lower.endsWith('.webp')) return 'image/webp'
+  if (lower.endsWith('.svg')) return 'image/svg+xml'
+  return 'image/jpeg'
+}
+
 function coerceHtmlBody(input: string): string {
   const content = String(input ?? '').trim()
   if (!content) {
@@ -74,12 +83,16 @@ export class MailgunService {
       // Add attachments with CID for inline images
       if (options.attachments) {
         for (const attachment of options.attachments) {
+          const cid = String(attachment.cid || '').trim()
+          const fileName = String(attachment.filename || cid || 'inline-image').trim()
           form.append(
             'inline',
             Buffer.from(attachment.data, 'base64'),
             {
-              filename: attachment.filename,
-              contentType: 'image/png'
+              // Mailgun resolves cid:<value> against the inline part filename/content-id.
+              // Keep the cid as the part filename so HTML references like cid:logo-main render inline.
+              filename: cid || fileName,
+              contentType: inferInlineContentType(fileName)
             } as any
           )
         }

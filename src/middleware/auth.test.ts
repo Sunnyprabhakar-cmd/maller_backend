@@ -84,6 +84,7 @@ test('authMiddleware rejects invalid authorization format', async () => {
 
 test('authMiddleware rejects unknown tokens', async () => {
   process.env.API_TOKEN = 'bootstrap-token'
+  process.env.NODE_ENV = 'development'
   const { authMiddleware } = await import('./auth.js')
 
   const req: any = {
@@ -109,4 +110,32 @@ test('authMiddleware rejects unknown tokens', async () => {
   assert.equal(nextCalled, false)
   assert.equal(res.statusCode, 401)
   assert.deepEqual(res.body, { error: 'Invalid token' })
+})
+
+test('authMiddleware accepts the dev fallback token in non-production even when API_TOKEN is configured', async () => {
+  process.env.API_TOKEN = 'bootstrap-token'
+  process.env.NODE_ENV = 'development'
+  const { authMiddleware } = await import('./auth.js')
+
+  const req: any = {
+    headers: {
+      authorization: 'Bearer dev-token-12345'
+    },
+    prisma: {
+      apiToken: {
+        findFirst: async () => {
+          throw new Error('should not query database for dev fallback token')
+        }
+      }
+    }
+  }
+  const res = createResponse()
+  let nextCalled = false
+
+  await authMiddleware(req, res as any, () => {
+    nextCalled = true
+  })
+
+  assert.equal(nextCalled, true)
+  assert.equal(res.statusCode, 200)
 })

@@ -1,6 +1,10 @@
 import { Router, Request, Response } from 'express'
 import { authMiddleware } from '../middleware/auth.js'
-import { buildEmailHtml, buildTextFallback } from '../services/render.js'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { buildEmailHtml, buildTextFallback, getSocialIconInlineAttachments } from '../services/render.js'
+import type { BuildEmailHtmlOptions } from '../services/render.js'
 import mailer from '../services/mailer.js'
 import { PrismaClient } from '@prisma/client'
 
@@ -133,6 +137,176 @@ function buildEmailVariables(campaign: any, recipient: { email: string; name?: s
   }
 }
 
+function toRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function hasOwnKey(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key)
+}
+
+function toCidAssetList(value: unknown): Array<{ cid?: string; filePath?: string; fileName?: string }> {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  return value.map((entry) => {
+    const item = toRecord(entry)
+    return {
+      cid: toNullableText(item.cid) ?? undefined,
+      filePath: toNullableText(item.filePath) ?? undefined,
+      fileName: toNullableText(item.fileName) ?? undefined
+    }
+  })
+}
+
+function normalizeLocalFilePath(value: unknown): string {
+  const raw = String(value ?? '').trim()
+  if (!raw) {
+    return ''
+  }
+  if (!raw.startsWith('file://')) {
+    return raw
+  }
+  try {
+    return fileURLToPath(raw)
+  } catch {
+    return raw
+  }
+}
+
+function mergeCampaignForSend(storedCampaign: any, overrideInput: unknown) {
+  const override = toRecord(overrideInput)
+  const { recipients: _ignoredRecipients, events: _ignoredEvents, ...rest } = override
+  const merged = {
+    ...storedCampaign,
+    ...rest,
+    id: storedCampaign.id,
+    recipients: storedCampaign.recipients
+  } as any
+
+  if (hasOwnKey(rest, 'logoPath')) {
+    merged.logoPath = normalizeLocalFilePath(rest.logoPath)
+  }
+  if (hasOwnKey(rest, 'bannerPath')) {
+    merged.bannerPath = normalizeLocalFilePath(rest.bannerPath)
+  }
+  if (hasOwnKey(rest, 'inlineImagePath')) {
+    merged.inlineImagePath = normalizeLocalFilePath(rest.inlineImagePath)
+  }
+  if (hasOwnKey(rest, 'cidAssets')) {
+    merged.cidAssets = toCidAssetList(rest.cidAssets)
+  }
+
+  return merged
+}
+
+function buildEmailHtmlOptions(campaign: any, data: Record<string, unknown>): BuildEmailHtmlOptions {
+  const logoSourceType = campaign.logoSourceType === 'cid' ? 'cid' : 'url'
+  const bannerSourceType = campaign.bannerSourceType === 'cid' ? 'cid' : 'url'
+  const inlineImageSourceType = campaign.inlineImageSourceType === 'cid' ? 'cid' : 'url'
+  return {
+    template: campaign.template,
+    htmlBody: campaign.htmlBody ?? campaign.template,
+    textBody: campaign.textBody ?? undefined,
+    data,
+    sourceType: (campaign.sourceType === 'cid' ? 'cid' : 'url') as 'cid' | 'url',
+    imageUrl: campaign.imageUrl ?? undefined,
+    imageCid: campaign.imageCid ?? undefined,
+    logoSourceType,
+    logoUrl: campaign.logoUrl ?? undefined,
+    logoCid: campaign.logoCid ?? undefined,
+    logoLinkUrl: campaign.logoLinkUrl ?? undefined,
+    bannerSourceType,
+    bannerUrl: campaign.bannerUrl ?? undefined,
+    bannerCid: campaign.bannerCid ?? undefined,
+    bannerLinkUrl: campaign.bannerLinkUrl ?? undefined,
+    inlineImageSourceType,
+    inlineImageUrl: campaign.inlineImageUrl ?? undefined,
+    inlineImageCid: campaign.inlineImageCid ?? undefined,
+    inlineImageLinkUrl: campaign.inlineImageLinkUrl ?? undefined,
+    companyName: campaign.companyName ?? undefined,
+    headerCompanyName: campaign.headerCompanyName ?? undefined,
+    footerCompanyName: campaign.footerCompanyName ?? undefined,
+    companyAddress: campaign.companyAddress ?? undefined,
+    companyContact: campaign.companyContact ?? undefined,
+    contactNumber: campaign.contactNumber ?? undefined,
+    footerContent: campaign.footerContent ?? undefined,
+    ctaUrl: campaign.ctaUrl ?? undefined,
+    facebookUrl: campaign.facebookUrl ?? undefined,
+    instagramUrl: campaign.instagramUrl ?? undefined,
+    xUrl: campaign.xUrl ?? undefined,
+    linkedinUrl: campaign.linkedinUrl ?? undefined,
+    whatsappUrl: campaign.whatsappUrl ?? undefined,
+    youtubeUrl: campaign.youtubeUrl ?? undefined,
+    socialIconSize: campaign.socialIconSize ?? undefined,
+    isNewsletter: campaign.isNewsletter ?? false,
+    newsletterEdition: campaign.newsletterEdition ?? undefined,
+    webhookUrl: campaign.webhookUrl ?? undefined
+  }
+}
+
+function buildTextFallbackOptions(campaign: any, data: Record<string, unknown>) {
+  return {
+    template: campaign.template,
+    htmlBody: campaign.htmlBody ?? campaign.template,
+    textBody: campaign.textBody ?? undefined,
+    data,
+    companyName: campaign.companyName ?? undefined,
+    headerCompanyName: campaign.headerCompanyName ?? undefined,
+    footerCompanyName: campaign.footerCompanyName ?? undefined,
+    companyAddress: campaign.companyAddress ?? undefined,
+    companyContact: campaign.companyContact ?? undefined,
+    contactNumber: campaign.contactNumber ?? undefined,
+    ctaUrl: campaign.ctaUrl ?? undefined,
+    whatsappUrl: campaign.whatsappUrl ?? undefined,
+    youtubeUrl: campaign.youtubeUrl ?? undefined
+  }
+}
+
+async function buildInlineAttachments(campaign: any): Promise<Array<{ filename: string; data: string; cid: string }>> {
+  const attachments = new Map<string, { filename: string; data: string; cid: string }>()
+
+  const addAttachment = async (label: string, cidValue: unknown, filePathValue: unknown, fileNameValue?: unknown) => {
+    const cid = String(cidValue ?? '').trim()
+    const filePath = normalizeLocalFilePath(filePathValue)
+    if (!cid && !filePath) {
+      return
+    }
+    if (!cid || !filePath) {
+      throw new Error(`${label} is set to CID mode but CID or local file is missing.`)
+    }
+
+    const data = await fs.readFile(filePath)
+    attachments.set(cid, {
+      filename: String(fileNameValue ?? path.basename(filePath) ?? cid).trim() || `${cid}.png`,
+      data: data.toString('base64'),
+      cid
+    })
+  }
+
+  if (campaign.logoSourceType === 'cid') {
+    await addAttachment('Logo', campaign.logoCid, campaign.logoPath)
+  }
+  if (campaign.bannerSourceType === 'cid' || campaign.sourceType === 'cid') {
+    await addAttachment('Banner', campaign.bannerCid ?? campaign.imageCid, campaign.bannerPath)
+  }
+  if (campaign.inlineImageSourceType === 'cid') {
+    await addAttachment('Inline image', campaign.inlineImageCid, campaign.inlineImagePath)
+  }
+
+  for (const asset of toCidAssetList(campaign.cidAssets)) {
+    await addAttachment('Additional CID asset', asset.cid, asset.filePath, asset.fileName)
+  }
+
+  for (const attachment of getSocialIconInlineAttachments()) {
+    attachments.set(attachment.cid, attachment)
+  }
+
+  return [...attachments.values()]
+}
+
 function renderSubjectTemplate(subject: string | null | undefined, data: Record<string, unknown>): string {
   let rendered = String(subject ?? '')
   for (const [key, value] of Object.entries(data)) {
@@ -261,57 +435,22 @@ router.post('/:id/send-test', async (req: Request, res: Response) => {
     const prisma = (req as any).prisma as PrismaClient
     const io = (req as any).io
 
-    const campaign: any = await prisma.campaign.findUnique({
+    const storedCampaign: any = await prisma.campaign.findUnique({
       where: { id: req.params.id },
       include: { recipients: true }
     })
 
-    if (!campaign) {
+    if (!storedCampaign) {
       return res.status(404).json({ error: 'Campaign not found' })
     }
 
-    // Build email HTML
-    const html = buildEmailHtml({
-      template: campaign.template,
-      htmlBody: campaign.htmlBody ?? campaign.template,
-      textBody: campaign.textBody ?? undefined,
-      data: buildEmailVariables(campaign, { email: testEmail, name: 'Test User' }),
-      sourceType: (campaign.sourceType === 'cid' ? 'cid' : 'url') as 'cid' | 'url',
-      imageUrl: campaign.imageUrl ?? undefined,
-      imageCid: campaign.imageCid ?? undefined,
-      logoSourceType: campaign.logoSourceType === 'cid' ? 'cid' : 'url',
-      logoUrl: campaign.logoUrl ?? undefined,
-      logoCid: campaign.logoCid ?? undefined,
-      logoLinkUrl: campaign.logoLinkUrl ?? undefined,
-      bannerSourceType: campaign.bannerSourceType === 'cid' ? 'cid' : 'url',
-      bannerUrl: campaign.bannerUrl ?? undefined,
-      bannerCid: campaign.bannerCid ?? undefined,
-      bannerLinkUrl: campaign.bannerLinkUrl ?? undefined,
-      inlineImageSourceType: campaign.inlineImageSourceType === 'cid' ? 'cid' : 'url',
-      inlineImageUrl: campaign.inlineImageUrl ?? undefined,
-      inlineImageCid: campaign.inlineImageCid ?? undefined,
-      inlineImageLinkUrl: campaign.inlineImageLinkUrl ?? undefined,
-      companyName: campaign.companyName ?? undefined,
-      headerCompanyName: campaign.headerCompanyName ?? undefined,
-      footerCompanyName: campaign.footerCompanyName ?? undefined,
-      companyAddress: campaign.companyAddress ?? undefined,
-      companyContact: campaign.companyContact ?? undefined,
-      contactNumber: campaign.contactNumber ?? undefined,
-      footerContent: campaign.footerContent ?? undefined,
-      ctaUrl: campaign.ctaUrl ?? undefined,
-      facebookUrl: campaign.facebookUrl ?? undefined,
-      instagramUrl: campaign.instagramUrl ?? undefined,
-      xUrl: campaign.xUrl ?? undefined,
-      linkedinUrl: campaign.linkedinUrl ?? undefined,
-      whatsappUrl: campaign.whatsappUrl ?? undefined,
-      youtubeUrl: campaign.youtubeUrl ?? undefined,
-      socialIconSize: campaign.socialIconSize ?? undefined,
-      isNewsletter: campaign.isNewsletter ?? false,
-      newsletterEdition: campaign.newsletterEdition ?? undefined,
-      webhookUrl: campaign.webhookUrl ?? undefined
-    })
-
+    const campaign = mergeCampaignForSend(storedCampaign, req.body?.override)
+    console.log(`[Campaign] Hosted test send start for ${testEmail} (campaign: ${campaign.id})`)
     const data = buildEmailVariables(campaign, { email: testEmail, name: 'Test User' })
+
+    // Build email HTML
+    const html = buildEmailHtml(buildEmailHtmlOptions(campaign, data))
+    const attachments = await buildInlineAttachments(campaign)
 
     // Send via Mailgun
     const messageId = await mailer.sendEmail({
@@ -319,23 +458,10 @@ router.post('/:id/send-test', async (req: Request, res: Response) => {
       campaignId: campaign.id,
       subject: renderSubjectTemplate(campaign.subject, data),
       html,
-      text: buildTextFallback({
-        template: campaign.template,
-        htmlBody: campaign.htmlBody ?? campaign.template,
-        textBody: campaign.textBody ?? undefined,
-        data,
-        companyName: campaign.companyName ?? undefined,
-        headerCompanyName: campaign.headerCompanyName ?? undefined,
-        footerCompanyName: campaign.footerCompanyName ?? undefined,
-        companyAddress: campaign.companyAddress ?? undefined,
-        companyContact: campaign.companyContact ?? undefined,
-        contactNumber: campaign.contactNumber ?? undefined,
-        ctaUrl: campaign.ctaUrl ?? undefined,
-        whatsappUrl: campaign.whatsappUrl ?? undefined,
-        youtubeUrl: campaign.youtubeUrl ?? undefined
-      }),
+      text: buildTextFallback(buildTextFallbackOptions(campaign, data)),
       from: campaign.senderEmail || undefined,
-      replyTo: campaign.replyToEmail || undefined
+      replyTo: campaign.replyToEmail || undefined,
+      attachments
     })
 
     // Emit to connected clients
@@ -348,6 +474,7 @@ router.post('/:id/send-test', async (req: Request, res: Response) => {
 
     res.json({ messageId, sent: true })
   } catch (error: any) {
+    console.error(`[Campaign] Hosted test send failed for ${req.body?.testEmail ?? 'unknown'} (campaign: ${req.params.id})`, error?.message || error)
     res.status(400).json({ error: error.message })
   }
 })
@@ -358,61 +485,32 @@ router.post('/:id/send', async (req: Request, res: Response) => {
     const prisma = (req as any).prisma as PrismaClient
     const io = (req as any).io
 
-    const campaign: any = await prisma.campaign.findUnique({
+    const storedCampaign: any = await prisma.campaign.findUnique({
       where: { id: req.params.id },
       include: { recipients: true }
     })
 
-    if (!campaign) {
+    if (!storedCampaign) {
       return res.status(404).json({ error: 'Campaign not found' })
     }
+
+    const campaign = mergeCampaignForSend(storedCampaign, req.body?.override)
+    console.log(`[Campaign] Hosted bulk send start for campaign ${campaign.id} with ${campaign.recipients.length} recipients`)
+    const attachments = await buildInlineAttachments(campaign)
+    const results: Array<{ email: string; status: 'sent' | 'failed'; error?: string }> = []
+
+    // Treat every bulk send as a fresh cycle so dashboard analytics don't accumulate stale webhook rows.
+    await prisma.webhookEvent.deleteMany({
+      where: { campaignId: campaign.id }
+    })
 
     let sent = 0
     let failed = 0
 
     for (const recipient of campaign.recipients) {
       try {
-        const html = buildEmailHtml({
-          template: campaign.template,
-          htmlBody: campaign.htmlBody ?? campaign.template,
-          textBody: campaign.textBody ?? undefined,
-          data: buildEmailVariables(campaign, recipient),
-          sourceType: (campaign.sourceType === 'cid' ? 'cid' : 'url') as 'cid' | 'url',
-          imageUrl: campaign.imageUrl ?? undefined,
-          imageCid: campaign.imageCid ?? undefined,
-          logoSourceType: campaign.logoSourceType === 'cid' ? 'cid' : 'url',
-          logoUrl: campaign.logoUrl ?? undefined,
-          logoCid: campaign.logoCid ?? undefined,
-          logoLinkUrl: campaign.logoLinkUrl ?? undefined,
-          bannerSourceType: campaign.bannerSourceType === 'cid' ? 'cid' : 'url',
-          bannerUrl: campaign.bannerUrl ?? undefined,
-          bannerCid: campaign.bannerCid ?? undefined,
-          bannerLinkUrl: campaign.bannerLinkUrl ?? undefined,
-          inlineImageSourceType: campaign.inlineImageSourceType === 'cid' ? 'cid' : 'url',
-          inlineImageUrl: campaign.inlineImageUrl ?? undefined,
-          inlineImageCid: campaign.inlineImageCid ?? undefined,
-          inlineImageLinkUrl: campaign.inlineImageLinkUrl ?? undefined,
-          companyName: campaign.companyName ?? undefined,
-          headerCompanyName: campaign.headerCompanyName ?? undefined,
-          footerCompanyName: campaign.footerCompanyName ?? undefined,
-          companyAddress: campaign.companyAddress ?? undefined,
-          companyContact: campaign.companyContact ?? undefined,
-          contactNumber: campaign.contactNumber ?? undefined,
-          footerContent: campaign.footerContent ?? undefined,
-          ctaUrl: campaign.ctaUrl ?? undefined,
-          facebookUrl: campaign.facebookUrl ?? undefined,
-          instagramUrl: campaign.instagramUrl ?? undefined,
-          xUrl: campaign.xUrl ?? undefined,
-          linkedinUrl: campaign.linkedinUrl ?? undefined,
-          whatsappUrl: campaign.whatsappUrl ?? undefined,
-          youtubeUrl: campaign.youtubeUrl ?? undefined,
-          socialIconSize: campaign.socialIconSize ?? undefined,
-          isNewsletter: campaign.isNewsletter ?? false,
-          newsletterEdition: campaign.newsletterEdition ?? undefined,
-          webhookUrl: campaign.webhookUrl ?? undefined
-        })
-
         const data = buildEmailVariables(campaign, recipient)
+        const html = buildEmailHtml(buildEmailHtmlOptions(campaign, data))
 
         await mailer.sendEmail({
           to: recipient.email,
@@ -420,43 +518,49 @@ router.post('/:id/send', async (req: Request, res: Response) => {
           campaignId: campaign.id,
           subject: renderSubjectTemplate(campaign.subject, data),
           html,
-          text: buildTextFallback({
-            template: campaign.template,
-            htmlBody: campaign.htmlBody ?? campaign.template,
-            textBody: campaign.textBody ?? undefined,
-            data,
-            companyName: campaign.companyName ?? undefined,
-            headerCompanyName: campaign.headerCompanyName ?? undefined,
-            footerCompanyName: campaign.footerCompanyName ?? undefined,
-            companyAddress: campaign.companyAddress ?? undefined,
-            companyContact: campaign.companyContact ?? undefined,
-            contactNumber: campaign.contactNumber ?? undefined,
-            ctaUrl: campaign.ctaUrl ?? undefined,
-            whatsappUrl: campaign.whatsappUrl ?? undefined,
-            youtubeUrl: campaign.youtubeUrl ?? undefined
-          }),
+          text: buildTextFallback(buildTextFallbackOptions(campaign, data)),
           from: campaign.senderEmail || undefined,
-          replyTo: campaign.replyToEmail || undefined
+          replyTo: campaign.replyToEmail || undefined,
+          attachments
         })
 
         sent++
+        results.push({
+          email: String(recipient.email),
+          status: 'sent'
+        })
         io.emit('email:sent', {
           campaignId: campaign.id,
           email: recipient.email,
           timestamp: new Date()
         })
       } catch (error) {
+        const errorMessage = String((error as Error)?.message ?? error ?? 'Unknown error')
         failed++
+        results.push({
+          email: String(recipient.email),
+          status: 'failed',
+          error: errorMessage
+        })
+        console.error(`[Campaign] Hosted send failed for ${recipient.email} (campaign: ${campaign.id})`, errorMessage)
         io.emit('email:failed', {
           campaignId: campaign.id,
           email: recipient.email,
-          error: String(error)
+          error: errorMessage
         })
       }
     }
 
-    res.json({ sent, failed, total: campaign.recipients.length })
+    const firstError = results.find((entry) => entry.status === 'failed' && entry.error)?.error
+    if (failed > 0) {
+      console.warn(`[Campaign] Hosted bulk send finished with failures for campaign ${campaign.id}: sent=${sent}, failed=${failed}${firstError ? `, firstError=${firstError}` : ''}`)
+    } else {
+      console.log(`[Campaign] Hosted bulk send finished for campaign ${campaign.id}: sent=${sent}, failed=0`)
+    }
+
+    res.json({ sent, failed, total: campaign.recipients.length, results, firstError })
   } catch (error: any) {
+    console.error(`[Campaign] Hosted bulk send route failed for campaign ${req.params.id}`, error?.message || error)
     res.status(400).json({ error: error.message })
   }
 })

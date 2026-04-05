@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 import mailer from '../services/mailer.js'
 
@@ -9,10 +12,12 @@ type RecipientRecord = Record<string, any>
 function createMockPrisma() {
   const campaigns = new Map<string, CampaignRecord>()
   const recipients = new Map<string, RecipientRecord[]>()
+  const webhookEvents: Array<Record<string, any>> = []
 
   return {
     campaigns,
     recipients,
+    webhookEvents,
     prisma: {
       campaign: {
         async create({ data }: any) {
@@ -87,7 +92,14 @@ function createMockPrisma() {
       },
       webhookEvent: {
         async findMany() {
-          return []
+          return webhookEvents
+        },
+        async deleteMany({ where }: any) {
+          const before = webhookEvents.length
+          const next = webhookEvents.filter((entry) => entry.campaignId !== where.campaignId)
+          webhookEvents.length = 0
+          webhookEvents.push(...next)
+          return { count: before - next.length }
         }
       }
     }
@@ -188,13 +200,17 @@ test('PUT /api/campaigns/:id updates stored campaign fields', async () => {
 })
 
 test('POST /api/campaigns/:id/send emits websocket events and uses rendered email data', async () => {
-  const { prisma, campaigns, recipients } = createMockPrisma()
+  const { prisma, campaigns, recipients, webhookEvents } = createMockPrisma()
+  const logoPath = path.join(os.tmpdir(), `maigun-logo-${Date.now()}.png`)
+  const bodyPath = path.join(os.tmpdir(), `maigun-body-${Date.now()}.png`)
+  await fs.writeFile(logoPath, Buffer.from('89504e470d0a1a0a', 'hex'))
+  await fs.writeFile(bodyPath, Buffer.from('89504e470d0a1a0a', 'hex'))
   campaigns.set('campaign-send-1', {
     id: 'campaign-send-1',
     name: 'Send Campaign',
     subject: 'Welcome {{name}}',
     template: '<p>Hello {{name}}</p>',
-    htmlBody: '<p>Hello {{name}}, use {{offer_code}}</p>',
+    htmlBody: '<p>Hello {{name}}, use {{offer_code}}</p><img src="cid:body-asset" alt="Body asset" />',
     textBody: 'Hello {{name}}, use {{offer_code}}',
     senderEmail: 'sender@example.com',
     replyToEmail: 'reply@example.com',
@@ -211,6 +227,8 @@ test('POST /api/campaigns/:id/send emits websocket events and uses rendered emai
     socialIconSize: 32,
     isNewsletter: true,
     newsletterEdition: 'Issue 9',
+    logoSourceType: 'cid',
+    logoCid: 'logo-inline',
     sourceType: 'url',
     imageUrl: null,
     imageCid: null,
@@ -229,6 +247,12 @@ test('POST /api/campaigns/:id/send emits websocket events and uses rendered emai
       }
     }
   ])
+  webhookEvents.push({
+    id: 'old-webhook-1',
+    campaignId: 'campaign-send-1',
+    email: 'user@example.com',
+    event: 'delivered'
+  })
 
   const sendCalls: any[] = []
   const ioEvents: any[] = []
@@ -242,6 +266,20 @@ test('POST /api/campaigns/:id/send emits websocket events and uses rendered emai
     const handler = await loadRouteHandler('/:id/send', 'post')
     const req: any = {
       params: { id: 'campaign-send-1' },
+      body: {
+        override: {
+          logoSourceType: 'cid',
+          logoCid: 'logo-inline',
+          logoPath,
+          cidAssets: [
+            {
+              cid: 'body-asset',
+              filePath: bodyPath,
+              fileName: 'body.png'
+            }
+          ]
+        }
+      },
       prisma,
       io: {
         emit: (...args: any[]) => ioEvents.push(args)
@@ -254,15 +292,26 @@ test('POST /api/campaigns/:id/send emits websocket events and uses rendered emai
     assert.equal(res.statusCode, 200)
     assert.equal(res.body.sent, 1)
     assert.equal(res.body.failed, 0)
+    assert.equal(res.body.results.length, 1)
+    assert.equal(res.body.results[0].status, 'sent')
     assert.equal(sendCalls.length, 1)
     assert.equal(sendCalls[0].from, 'sender@example.com')
     assert.equal(sendCalls[0].replyTo, 'reply@example.com')
     assert.match(sendCalls[0].html, /Newsletter Issue 9/)
     assert.match(sendCalls[0].html, /Acme Footer/)
+    assert.match(sendCalls[0].html, /cid:social_facebook/)
+    assert.match(sendCalls[0].html, /cid:logo-inline/)
+    assert.equal(Array.isArray(sendCalls[0].attachments), true)
+    assert.equal(sendCalls[0].attachments.some((entry: any) => entry.cid === 'social_facebook'), true)
+    assert.equal(sendCalls[0].attachments.some((entry: any) => entry.cid === 'logo-inline'), true)
+    assert.equal(sendCalls[0].attachments.some((entry: any) => entry.cid === 'body-asset'), true)
     assert.match(sendCalls[0].text, /AB12/)
     assert.equal(ioEvents.length, 1)
     assert.equal(ioEvents[0][0], 'email:sent')
+    assert.equal(webhookEvents.length, 0)
   } finally {
     mailer.sendEmail = originalSendEmail
+    await fs.rm(logoPath, { force: true })
+    await fs.rm(bodyPath, { force: true })
   }
 })

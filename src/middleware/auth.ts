@@ -17,6 +17,10 @@ function isProductionEnv(): boolean {
   return String(process.env.NODE_ENV ?? '').trim().toLowerCase() === 'production'
 }
 
+function isDevFallbackTokenAccepted(): boolean {
+  return !isProductionEnv()
+}
+
 export function getAcceptedBootstrapToken(): string | null {
   const explicit = readExplicitBootstrapToken()
   if (explicit) {
@@ -51,9 +55,17 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
   }
 
   const bootstrapToken = getAcceptedBootstrapToken()
+  const devFallbackAccepted = isDevFallbackTokenAccepted()
 
-  // Allow explicit bootstrap tokens everywhere, but only allow the dev fallback token outside production.
+  // Allow explicit bootstrap tokens everywhere.
   if (bootstrapToken && token === bootstrapToken) {
+    next()
+    return
+  }
+
+  // In local/non-production use, always keep the fallback token available so the desktop app
+  // can talk to the backend even when an explicit bootstrap token is configured in backend/.env.
+  if (devFallbackAccepted && token === DEV_FALLBACK_TOKEN) {
     next()
     return
   }

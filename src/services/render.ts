@@ -6,8 +6,11 @@ import {
   buildWrappedEmailHtml,
   buildInterpolatedTextFallback
 } from '../shared/email-layout.js'
+import { existsSync, readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-interface BuildEmailHtmlOptions {
+export interface BuildEmailHtmlOptions {
   template?: string
   htmlBody?: string
   textBody?: string
@@ -45,6 +48,35 @@ interface BuildEmailHtmlOptions {
   isNewsletter?: boolean
   newsletterEdition?: string
   webhookUrl?: string
+}
+
+const __dirname = fileURLToPath(new URL('.', import.meta.url))
+
+const SOCIAL_ICON_CID: Record<string, string> = {
+  facebook: 'social_facebook',
+  instagram: 'social_instagram',
+  x: 'social_x',
+  linkedin: 'social_linkedin',
+  whatsapp: 'social_whatsapp',
+  youtube: 'social_youtube'
+}
+
+function resolveSocialIconPath(fileName: string): string {
+  const candidates = [
+    resolve(process.cwd(), 'src/shared/social-icons', fileName),
+    resolve(process.cwd(), '../src/shared/social-icons', fileName),
+    resolve(__dirname, '../../../src/shared/social-icons', fileName)
+  ]
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]
+}
+
+const SOCIAL_ICON_PATHS: Record<string, string> = {
+  facebook: resolveSocialIconPath('facebook.png'),
+  instagram: resolveSocialIconPath('instagram.png'),
+  x: resolveSocialIconPath('x.png'),
+  linkedin: resolveSocialIconPath('linkedin.png'),
+  whatsapp: resolveSocialIconPath('whatsapp.png'),
+  youtube: resolveSocialIconPath('youtube.png')
 }
 
 function resolveImageSrc(sourceType: string, imageUrl?: string, imageCid?: string): string {
@@ -182,6 +214,19 @@ export function buildTextFallback(options: BuildEmailHtmlOptions): string {
     options.data,
     String(options.htmlBody || options.template || '')
   )
+}
+
+export function getSocialIconInlineAttachments(): Array<{ filename: string; data: string; cid: string }> {
+  return Object.entries(SOCIAL_ICON_PATHS).flatMap(([key, filePath]) => {
+    if (!existsSync(filePath)) {
+      return []
+    }
+    return [{
+      filename: `${key}.png`,
+      data: readFileSync(filePath).toString('base64'),
+      cid: SOCIAL_ICON_CID[key]
+    }]
+  })
 }
 
 export { resolveImageSrc, normalizeLinkUrl, interpolateTemplate }

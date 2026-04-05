@@ -89,12 +89,25 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
 })
 
 // Health check
-app.get('/health', (req: express.Request, res: express.Response) => {
+app.get('/health', async (req: express.Request, res: express.Response) => {
+  let database = {
+    status: 'ok' as 'ok' | 'unreachable'
+  }
+
+  try {
+    await prisma.$queryRawUnsafe('SELECT 1')
+  } catch {
+    database = {
+      status: 'unreachable'
+    }
+  }
+
   res.json({
-    status: 'ok',
+    status: database.status === 'ok' ? 'ok' : 'degraded',
     timestamp: new Date().toISOString(),
     deploySignature: DEPLOY_SIGNATURE,
-    service: 'maller-backend-1'
+    service: 'maller-backend-1',
+    database
   })
 })
 
