@@ -57,12 +57,21 @@ function resolveImageSrc(sourceType: string, imageUrl?: string, imageCid?: strin
   return ''
 }
 
-function buildSocialLink(href: string | undefined, label: string, size: number): string {
+function resolvePublicBaseUrl(): string {
+  if (process.env.RENDER_EXTERNAL_HOSTNAME) {
+    return `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`
+  }
+  return 'http://localhost:3000'
+}
+
+function buildSocialLink(href: string | undefined, label: string, size: number, iconBaseUrl: string): string {
   const url = normalizeLinkUrl(String(href || ''))
   if (!url) {
     return ''
   }
-  return `<a href="${url}" aria-label="${label}" title="${label}" style="display:inline-block;margin:0 4px;padding:0 10px;height:${size}px;line-height:${size}px;border-radius:999px;background:#f5efea;border:1px solid #d9c9b7;color:#5f4936;font-size:12px;text-decoration:none;">${label}</a>`
+  const iconName = label.toLowerCase() === 'linkedin' ? 'linkedin' : label.toLowerCase()
+  const iconUrl = `${iconBaseUrl.replace(/\/+$/, '')}/assets/social-icons/${iconName}.png`
+  return `<a href="${url}" aria-label="${label}" title="${label}" style="display:inline-block;margin:0 4px;vertical-align:middle;text-decoration:none;"><img src="${iconUrl}" alt="${label}" style="width:${size}px;height:${size}px;border-radius:50%;display:block;border:none;outline:none;text-decoration:none;" /></a>`
 }
 
 export function buildEmailHtml(options: BuildEmailHtmlOptions): string {
@@ -91,6 +100,7 @@ export function buildEmailHtml(options: BuildEmailHtmlOptions): string {
   const companyContact = String(options.companyContact || '')
   const contactNumber = String(options.contactNumber || '')
   const socialIconSize = [28, 32, 36].includes(Number(options.socialIconSize)) ? Number(options.socialIconSize) : 32
+  const iconBaseUrl = resolvePublicBaseUrl()
   const logoLinkUrl = normalizeLinkUrl(String(options.logoLinkUrl || ''))
   const bannerLinkUrl = normalizeLinkUrl(String(options.bannerLinkUrl || options.ctaUrl || ''))
   const inlineImageLinkUrl = normalizeLinkUrl(String(options.inlineImageLinkUrl || ''))
@@ -101,12 +111,12 @@ export function buildEmailHtml(options: BuildEmailHtmlOptions): string {
   const bodyHasBannerCid = bodyContainsCidImage(body, options.bannerSourceType === 'cid' ? options.bannerCid : undefined)
   const bodyHasInlineCid = bodyContainsCidImage(body, options.inlineImageSourceType === 'cid' ? options.inlineImageCid : undefined)
   const socialLinks = [
-    buildSocialLink(options.facebookUrl, 'Facebook', socialIconSize),
-    buildSocialLink(options.instagramUrl, 'Instagram', socialIconSize),
-    buildSocialLink(options.xUrl, 'X', socialIconSize),
-    buildSocialLink(options.linkedinUrl, 'LinkedIn', socialIconSize),
-    buildSocialLink(options.whatsappUrl, 'WhatsApp', socialIconSize),
-    buildSocialLink(options.youtubeUrl, 'YouTube', socialIconSize)
+    buildSocialLink(options.facebookUrl, 'Facebook', socialIconSize, iconBaseUrl),
+    buildSocialLink(options.instagramUrl, 'Instagram', socialIconSize, iconBaseUrl),
+    buildSocialLink(options.xUrl, 'X', socialIconSize, iconBaseUrl),
+    buildSocialLink(options.linkedinUrl, 'LinkedIn', socialIconSize, iconBaseUrl),
+    buildSocialLink(options.whatsappUrl, 'WhatsApp', socialIconSize, iconBaseUrl),
+    buildSocialLink(options.youtubeUrl, 'YouTube', socialIconSize, iconBaseUrl)
   ].filter(Boolean).join('')
   const unsubscribeUrl = interpolateTemplate('{{unsubscribe_url}}', {
     ...options.data,
