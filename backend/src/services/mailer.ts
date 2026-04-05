@@ -13,6 +13,27 @@ interface SendEmailOptions {
   attachments?: Array<{ filename: string; data: string; cid: string }>
 }
 
+function coerceHtmlBody(input: string): string {
+  const content = String(input ?? '').trim()
+  if (!content) {
+    return '<html><body><p></p></body></html>'
+  }
+
+  if (/<\/?[a-z][\s\S]*>/i.test(content)) {
+    return content
+  }
+
+  const safe = content
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/\n/g, '<br />')
+
+  return `<html><body><p>${safe}</p></body></html>`
+}
+
 export class MailgunService {
   private apiKey: string
   private domain: string
@@ -31,21 +52,24 @@ export class MailgunService {
   async sendEmail(options: SendEmailOptions): Promise<string> {
     try {
       const form = new FormData()
+      const appendSharedField = (key: string, value: string) => {
+        form.append(key, value)
+      }
 
-      form.append('from', options.from || `noreply@${this.domain}`)
-      form.append('to', options.to)
-      form.append('subject', options.subject)
-      form.append('html', options.html)
+      appendSharedField('from', options.from || `noreply@${this.domain}`)
+      appendSharedField('to', options.to)
+      appendSharedField('subject', options.subject)
+      appendSharedField('html', coerceHtmlBody(options.html))
       if (options.text) {
-        form.append('text', options.text)
+        appendSharedField('text', options.text)
       }
       if (options.replyTo) {
-        form.append('h:Reply-To', options.replyTo)
+        appendSharedField('h:Reply-To', options.replyTo)
       }
-      
+
       // Custom data for webhook tracking
-      form.append('v:campaign_id', options.campaignId)
-      form.append('v:recipient_name', options.recipientName || '')
+      appendSharedField('v:campaign_id', options.campaignId)
+      appendSharedField('v:recipient_name', options.recipientName || '')
 
       // Add attachments with CID for inline images
       if (options.attachments) {

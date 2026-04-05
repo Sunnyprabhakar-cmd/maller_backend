@@ -1,7 +1,7 @@
 import type { AppSettings, Campaign, EmailRecipient } from '../types'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { buildEmailHtml, buildTextFallback, renderCampaignSubject, getSocialIconCidAssets } from './render'
+import { buildEmailHtml, buildTextFallback, renderCampaignSubject } from './render'
 
 type SendResult = {
   ok: boolean
@@ -18,6 +18,27 @@ type InlineAsset = {
   filePath: string
   fileName: string
   mimeType: string
+}
+
+function coerceHtmlBody(input: string): string {
+  const content = String(input ?? '').trim()
+  if (!content) {
+    return '<html><body><p></p></body></html>'
+  }
+
+  if (/<\/?[a-z][\s\S]*>/i.test(content)) {
+    return content
+  }
+
+  const safe = content
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/\n/g, '<br />')
+
+  return `<html><body><p>${safe}</p></body></html>`
 }
 
 function inferMimeType(filePath: string): string {
@@ -79,29 +100,31 @@ export async function sendWithMailgun(
     return { ok: false, status: 'failed', error: 'Mailgun is not configured' }
   }
 
-  // Include social icon CID assets in the campaign
-  const socialIconAssets = getSocialIconCidAssets()
-  const campaignWithSocial = {
-    ...campaign,
-    cidAssets: [...(campaign.cidAssets ?? []), ...socialIconAssets]
-  }
-
-  const inlineAssets = collectInlineAssets(campaignWithSocial)
+  const inlineAssets = collectInlineAssets(campaign)
   if (inlineAssets.error) {
     return { ok: false, status: 'failed', error: inlineAssets.error }
   }
 
+  const subject = renderCampaignSubject(campaign, recipient)
+  const html = buildEmailHtml(campaign, recipient)
+  const text = buildTextFallback(campaign, recipient)
+  const replyTo = campaign.replyToEmail || settings.defaultReplyTo
+
   const form = new FormData()
-  form.append('from', campaign.senderEmail)
-  form.append('to', recipient.email)
-  form.append('subject', renderCampaignSubject(campaign, recipient))
-  form.append('html', buildEmailHtml(campaign, recipient))
-  form.append('text', buildTextFallback(campaign, recipient))
-  form.append('h:Reply-To', campaign.replyToEmail || settings.defaultReplyTo)
-  form.append('v:campaignId', campaign.id)
-  form.append('o:tracking', 'yes')
-  form.append('o:tracking-opens', 'yes')
-  form.append('o:tracking-clicks', 'yes')
+  const appendSharedField = (key: string, value: string) => {
+    form.append(key, value)
+  }
+
+  appendSharedField('from', campaign.senderEmail)
+  appendSharedField('to', recipient.email)
+  appendSharedField('subject', subject)
+  appendSharedField('html', coerceHtmlBody(html))
+  appendSharedField('text', text)
+  appendSharedField('h:Reply-To', replyTo)
+  appendSharedField('v:campaign_id', campaign.id)
+  appendSharedField('o:tracking', 'yes')
+  appendSharedField('o:tracking-opens', 'yes')
+  appendSharedField('o:tracking-clicks', 'yes')
 
   for (const asset of inlineAssets.assets) {
     try {
