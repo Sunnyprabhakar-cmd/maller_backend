@@ -1,4 +1,3 @@
-import DOMPurify from 'isomorphic-dompurify'
 import {
   normalizeLinkUrl,
   compactFragment,
@@ -138,7 +137,7 @@ export function buildEmailHtml(options: BuildEmailHtmlOptions): string {
     unsubscribeUrl
   })
 
-  return DOMPurify.sanitize(emailHtml, { ALLOWED_TAGS: ['*'], ALLOWED_ATTR: ['*'] })
+  return emailHtml
 }
 
 export function buildTextFallback(options: BuildEmailHtmlOptions): string {

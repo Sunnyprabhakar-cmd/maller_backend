@@ -133,6 +133,14 @@ function buildEmailVariables(campaign: any, recipient: { email: string; name?: s
   }
 }
 
+function renderSubjectTemplate(subject: string | null | undefined, data: Record<string, unknown>): string {
+  let rendered = String(subject ?? '')
+  for (const [key, value] of Object.entries(data)) {
+    rendered = rendered.replace(new RegExp(`\\{\\{\\s*${key}\\s*\\}\\}`, 'g'), String(value ?? ''))
+  }
+  return rendered
+}
+
 // Create campaign
 router.post('/', async (req: Request, res: Response) => {
   try {
@@ -309,7 +317,7 @@ router.post('/:id/send-test', async (req: Request, res: Response) => {
     const messageId = await mailer.sendEmail({
       to: testEmail,
       campaignId: campaign.id,
-      subject: campaign.subject,
+      subject: renderSubjectTemplate(campaign.subject, data),
       html,
       text: buildTextFallback({
         template: campaign.template,
@@ -410,7 +418,7 @@ router.post('/:id/send', async (req: Request, res: Response) => {
           to: recipient.email,
           recipientName: recipient.name || undefined,
           campaignId: campaign.id,
-          subject: campaign.subject,
+          subject: renderSubjectTemplate(campaign.subject, data),
           html,
           text: buildTextFallback({
             template: campaign.template,
