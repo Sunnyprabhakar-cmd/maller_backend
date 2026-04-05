@@ -12,6 +12,7 @@
 - `NODE_ENV` - Set to "production" for Render
 - `PORT` - Server port (default: 3000)
 - `WEBHOOK_URL` - Full URL for Mailgun callbacks
+- `EMAIL_ASSET_BASE_URL` - Optional public base URL for email assets (social icons)
 - `ELECTRON_ORIGIN` - CORS origin for Electron app
 
 ### Example Configurations
@@ -25,6 +26,7 @@ MAILGUN_API_KEY=key-xxxxxx
 MAILGUN_DOMAIN=sandbox123.mailgun.org
 API_TOKEN=dev-token-12345
 WEBHOOK_URL=http://localhost:3000/api/webhooks
+EMAIL_ASSET_BASE_URL=http://localhost:3000
 ELECTRON_ORIGIN=http://localhost:5173
 ```
 
@@ -37,6 +39,7 @@ MAILGUN_API_KEY=key-xxxxxx
 MAILGUN_DOMAIN=yourdomain.mailgun.org
 API_TOKEN=[strong-random-token]
 WEBHOOK_URL=https://maigun-backend-xxxxx.onrender.com/api/webhooks
+EMAIL_ASSET_BASE_URL=https://maigun-backend-xxxxx.onrender.com
 ELECTRON_ORIGIN=*
 ```
 

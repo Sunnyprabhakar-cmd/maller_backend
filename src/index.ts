@@ -5,6 +5,9 @@ import cors from 'cors'
 import dotenv from 'dotenv'
 import { PrismaClient } from '@prisma/client'
 import { createHash } from 'crypto'
+import fs from 'fs'
+import path from 'path'
+import { fileURLToPath } from 'url'
 import { isFallbackAuthEnabled } from './middleware/auth.js'
 
 // Routes
@@ -13,6 +16,9 @@ import webhookRoutes from './api/webhooks.js'
 import tokenRoutes from './api/tokens.js'
 
 dotenv.config()
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
 
 const DEPLOY_SIGNATURE = createHash('sha1').update('webhook-recovery-v5').digest('hex').slice(0, 12)
 const configuredOrigin = process.env.ELECTRON_ORIGIN || 'http://localhost:5173'
@@ -62,6 +68,18 @@ app.use(cors({
 }))
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
+
+const socialIconCandidates = [
+  path.resolve(__dirname, '../../src/shared/social-icons'),
+  path.resolve(__dirname, '../shared/social-icons')
+]
+const socialIconPath = socialIconCandidates.find((candidate) => fs.existsSync(candidate))
+if (socialIconPath) {
+  app.use('/assets/social-icons', express.static(socialIconPath))
+  console.log(`[Backend] Serving social icons from ${socialIconPath}`)
+} else {
+  console.warn('[Backend] Social icon directory not found; /assets/social-icons will return 404')
+}
 
 // Attach prisma and io to requests
 app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {

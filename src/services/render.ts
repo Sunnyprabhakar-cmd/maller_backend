@@ -57,21 +57,47 @@ function resolveImageSrc(sourceType: string, imageUrl?: string, imageCid?: strin
   return ''
 }
 
-function resolvePublicBaseUrl(): string {
-  if (process.env.RENDER_EXTERNAL_HOSTNAME) {
-    return `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`
+function resolveSocialIconBaseUrl(webhookUrl?: string): string {
+  // Priority 1: Explicitly configured asset base URL
+  const configuredBase = String(process.env.EMAIL_ASSET_BASE_URL || '').trim().replace(/\/+$/, '')
+  if (configuredBase) {
+    return `${configuredBase}/assets/social-icons`
   }
-  return 'http://localhost:3000'
+
+  // Priority 2: Use Render deployment hostname if available (production deployment)
+  const renderHost = process.env.RENDER_EXTERNAL_HOSTNAME
+  if (renderHost) {
+    return `https://${renderHost}/assets/social-icons`
+  }
+
+  // Priority 3: Extract origin from webhook URL (local or custom)
+  const fromWebhook = String(webhookUrl || '').trim()
+  if (fromWebhook) {
+    try {
+      const parsed = new URL(fromWebhook)
+      return `${parsed.origin}/assets/social-icons`
+    } catch {
+      // ignore malformed webhook URL and fall through
+    }
+  }
+
+  // Fallback: local development only
+  return 'http://localhost:3000/assets/social-icons'
 }
 
-function buildSocialLink(href: string | undefined, label: string, size: number, iconBaseUrl: string): string {
+function buildSocialIconLink(
+  href: string | undefined,
+  label: string,
+  iconFile: string,
+  size: number,
+  iconBaseUrl: string
+): string {
   const url = normalizeLinkUrl(String(href || ''))
   if (!url) {
     return ''
   }
-  const iconName = label.toLowerCase() === 'linkedin' ? 'linkedin' : label.toLowerCase()
-  const iconUrl = `${iconBaseUrl.replace(/\/+$/, '')}/assets/social-icons/${iconName}.png`
-  return `<a href="${url}" aria-label="${label}" title="${label}" style="display:inline-block;margin:0 4px;vertical-align:middle;text-decoration:none;"><img src="${iconUrl}" alt="${label}" style="width:${size}px;height:${size}px;border-radius:50%;display:block;border:none;outline:none;text-decoration:none;" /></a>`
+  const iconSrc = `${iconBaseUrl}/${iconFile}`
+  return `<a href="${url}" aria-label="${label}" title="${label}" style="display:inline-block;margin:0 6px;text-decoration:none;"><img src="${iconSrc}" alt="${label}" width="${size}" height="${size}" style="display:block;width:${size}px;height:${size}px;border:0;outline:none;text-decoration:none;" /></a>`
 }
 
 export function buildEmailHtml(options: BuildEmailHtmlOptions): string {
@@ -100,7 +126,7 @@ export function buildEmailHtml(options: BuildEmailHtmlOptions): string {
   const companyContact = String(options.companyContact || '')
   const contactNumber = String(options.contactNumber || '')
   const socialIconSize = [28, 32, 36].includes(Number(options.socialIconSize)) ? Number(options.socialIconSize) : 32
-  const iconBaseUrl = resolvePublicBaseUrl()
+  const socialIconBaseUrl = resolveSocialIconBaseUrl(options.webhookUrl)
   const logoLinkUrl = normalizeLinkUrl(String(options.logoLinkUrl || ''))
   const bannerLinkUrl = normalizeLinkUrl(String(options.bannerLinkUrl || options.ctaUrl || ''))
   const inlineImageLinkUrl = normalizeLinkUrl(String(options.inlineImageLinkUrl || ''))
@@ -111,12 +137,12 @@ export function buildEmailHtml(options: BuildEmailHtmlOptions): string {
   const bodyHasBannerCid = bodyContainsCidImage(body, options.bannerSourceType === 'cid' ? options.bannerCid : undefined)
   const bodyHasInlineCid = bodyContainsCidImage(body, options.inlineImageSourceType === 'cid' ? options.inlineImageCid : undefined)
   const socialLinks = [
-    buildSocialLink(options.facebookUrl, 'Facebook', socialIconSize, iconBaseUrl),
-    buildSocialLink(options.instagramUrl, 'Instagram', socialIconSize, iconBaseUrl),
-    buildSocialLink(options.xUrl, 'X', socialIconSize, iconBaseUrl),
-    buildSocialLink(options.linkedinUrl, 'LinkedIn', socialIconSize, iconBaseUrl),
-    buildSocialLink(options.whatsappUrl, 'WhatsApp', socialIconSize, iconBaseUrl),
-    buildSocialLink(options.youtubeUrl, 'YouTube', socialIconSize, iconBaseUrl)
+    buildSocialIconLink(options.facebookUrl, 'Facebook', 'facebook.png', socialIconSize, socialIconBaseUrl),
+    buildSocialIconLink(options.instagramUrl, 'Instagram', 'instagram.png', socialIconSize, socialIconBaseUrl),
+    buildSocialIconLink(options.xUrl, 'X', 'x.png', socialIconSize, socialIconBaseUrl),
+    buildSocialIconLink(options.linkedinUrl, 'LinkedIn', 'linkedin.png', socialIconSize, socialIconBaseUrl),
+    buildSocialIconLink(options.whatsappUrl, 'WhatsApp', 'whatsapp.png', socialIconSize, socialIconBaseUrl),
+    buildSocialIconLink(options.youtubeUrl, 'YouTube', 'youtube.png', socialIconSize, socialIconBaseUrl)
   ].filter(Boolean).join('')
   const unsubscribeUrl = interpolateTemplate('{{unsubscribe_url}}', {
     ...options.data,
