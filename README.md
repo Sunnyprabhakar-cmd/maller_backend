@@ -115,7 +115,7 @@ Use [RENDER_DEPLOYMENT.md](/home/sunny/maigun_from_scratch/RENDER_DEPLOYMENT.md)
 The current Render build command from [render.yaml](/home/sunny/maigun_from_scratch/render.yaml) is:
 
 ```bash
-cd backend && npm install && npm run db:generate && npm run db:push && npm run build
+cd backend && npm install --include=dev && npm run db:generate && npm run db:push && npm run build
 ```
 
 That matters because the backend schema now evolves alongside the richer hosted campaign model.

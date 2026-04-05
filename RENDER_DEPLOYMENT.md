@@ -11,7 +11,7 @@ This guide reflects the current project behavior:
 The repo already includes [render.yaml](/home/sunny/maigun_from_scratch/render.yaml) with:
 
 ```yaml
-buildCommand: "cd backend && npm install && npm run db:generate && npm run db:push && npm run build"
+buildCommand: "cd backend && npm install --include=dev && npm run db:generate && npm run db:push && npm run build"
 startCommand: "cd backend && npm start"
 ```
 
@@ -29,7 +29,7 @@ startCommand: "cd backend && npm start"
 
 ```text
 Runtime: Node
-Build Command: cd backend && npm install && npm run db:generate && npm run db:push && npm run build
+Build Command: cd backend && npm install --include=dev && npm run db:generate && npm run db:push && npm run build
 Start Command: cd backend && npm start
 ```
 
@@ -134,8 +134,10 @@ If hosted sync/send fails:
 Make sure the build command includes:
 
 ```bash
-npm run db:generate && npm run db:push
+npm install --include=dev && npm run db:generate && npm run db:push
 ```
+
+Render builds this service with `NODE_ENV=production`, so `--include=dev` is important here. Without it, build-time tools like `prisma` and `tsc` may be missing and the deploy can fail with exit status `127`.
 
 ### Mailgun webhooks rejected
 Check:
