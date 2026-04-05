@@ -8,6 +8,9 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
+    "test:ui": "node --import ./backend/node_modules/tsx/dist/loader.mjs --import ./src/renderer/src/test/register-dom.ts --test src/renderer/src/**/*.ui.test.tsx",
+    "test:renderer": "node --import ./backend/node_modules/tsx/dist/loader.mjs --test src/renderer/src/**/*.test.ts",
+    "test:backend": "cd backend && npm test",
     "dev:backend": "cd backend && npm run dev",
     "dev:all": "npm run dev & npm run dev:backend",
     "setup": "npm install && cd backend && npm install && npm run db:generate",
@@ -20,6 +23,8 @@
     "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^22.13.10",
     "@types/papaparse": "^5.3.15",
     "@types/react": "^18.3.18",
@@ -27,7 +32,9 @@
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^34.2.0",
     "electron-vite": "^3.1.0",
+    "jsdom": "^29.0.1",
     "typescript": "^5.7.3",
-    "vite": "^5.4.14"
+    "vite": "^5.4.14",
+    "vitest": "^4.1.2"
   }
 }

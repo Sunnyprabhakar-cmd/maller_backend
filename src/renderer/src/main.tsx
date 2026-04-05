@@ -1,8 +1,44 @@
-// @ts-nocheck
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import { apiClient } from './api-client'
 import { wsClient } from './ws-client'
+import { CsvPanel } from './CsvPanel'
+import { CampaignActionsPanel } from './CampaignActionsPanel'
+import { SettingsPanel } from './SettingsPanel'
+import { PreviewPanel } from './PreviewPanel'
+import { AuthGate } from './AuthGate'
+import { parseCsvPreview, buildMappedCsv as mapCsvText } from './csv-utils'
+import { buildReceiverPreview } from './preview-utils'
+import {
+  buildRecipientEmailSet,
+  canonicalEventType,
+  fetchCampaignProgressMap,
+  fetchRecoveredHostedEventsForRecipients,
+  fetchRemoteCampaignEvents,
+  hasRealWebhookEvent,
+  isWebhookMetricEvent,
+  mergeCampaignLists,
+  mergeEventsUnique,
+  normalizeEmail,
+  normalizeRemoteEvent,
+  normalizeSocketWebhookEvent
+} from './dashboard-sync'
+import {
+  syncCampaignToHosted,
+  syncRecipientsToHosted,
+  ensureHostedCampaignReady
+} from './hosted-sync'
+import type {
+  Campaign,
+  CampaignEvent,
+  HostedSendResult,
+  LocalSendResult,
+  Progress,
+  Settings,
+  SocialIconUrls,
+  SocketWebhookPayload,
+  UploadSummary
+} from './types'
 import './styles.css'
 
 function svgToDataUri(svg: string): string {
@@ -52,83 +88,6 @@ function deriveBackendWebhookEndpoint(apiUrl: string): string {
   return `${trimmed}/api/webhooks`
 }
 
-type Campaign = {
-  id: string
-  name: string
-  isNewsletter: boolean
-  newsletterEdition: string
-  subject: string
-  htmlBody: string
-  textBody: string
-  senderEmail: string
-  replyToEmail: string
-  companyName: string
-  headerCompanyName: string
-  footerCompanyName: string
-  companyAddress: string
-  companyContact: string
-  contactNumber: string
-  footerContent: string
-  logoUrl?: string
-  logoLinkUrl?: string
-  logoSourceType?: 'url' | 'cid'
-  logoCid?: string
-  logoPath?: string
-  bannerUrl?: string
-  bannerLinkUrl?: string
-  bannerSourceType?: 'url' | 'cid'
-  bannerCid?: string
-  bannerPath?: string
-  inlineImageUrl?: string
-  inlineImageLinkUrl?: string
-  inlineImageSourceType?: 'url' | 'cid'
-  inlineImageCid?: string
-  inlineImagePath?: string
-  cidAssets?: Array<{ cid: string; filePath: string; fileName: string }>
-  ctaUrl?: string
-  ctaImageUrl?: string
-  facebookUrl?: string
-  instagramUrl?: string
-  xUrl?: string
-  linkedinUrl?: string
-  whatsappUrl?: string
-  youtubeUrl?: string
-  socialIconSize?: 28 | 32 | 36
-  scheduledAt?: string
-  status: string
-}
-
-type Settings = {
-  mailgunApiKey: string
-  mailgunDomain: string
-  senderEmails: string[]
-  recentTestEmails: string[]
-  defaultReplyTo: string
-  webhookSecret: string
-  throttlePerMinute: number
-  retryAttempts: number
-  autoWatchFolder: string
-  imageUploadProvider: 'none' | 'imgbb'
-  imageUploadApiKey: string
-  googleDriveEnabled: boolean
-  googleDriveClientId: string
-  googleDriveClientSecret: string
-  googleDriveRefreshToken: string
-  googleDriveFolderId: string
-  appUsername: string
-  appPassword: string
-}
-
-type Progress = {
-  total: number
-  queued: number
-  sent: number
-  failed: number
-  suppressed: number
-  inProgress: number
-  percent: number
-}
-
 function deriveCampaignStatus(baseStatus: string | undefined, progress: Progress | undefined): string {
   if (!progress || progress.total <= 0) {
     return String(baseStatus ?? 'draft')
@@ -151,165 +110,6 @@ function deriveCampaignStatus(baseStatus: string | undefined, progress: Progress
   }
 
   return String(baseStatus ?? 'draft')
-}
-
-function normalizeRemoteEvent(event: any): any {
-  const rawType = String(event?.event ?? event?.type ?? 'failed').toLowerCase()
-  const normalizedType = rawType === 'open'
-    ? 'opened'
-    : rawType === 'click'
-      ? 'clicked'
-      : rawType === 'bounce'
-        ? 'bounced'
-        : rawType
-
-  return {
-    id: String(event?.id ?? ''),
-    campaignId: String(event?.campaignId ?? ''),
-    recipientEmail: String(event?.email ?? event?.recipientEmail ?? event?.recipient ?? ''),
-    type: normalizedType,
-    payload: {
-      ...(event?.data ?? event?.payload ?? {}),
-      _source: 'mailgun-webhook'
-    },
-    createdAt: event?.timestamp ?? event?.createdAt ?? new Date().toISOString()
-  }
-}
-
-function normalizeSocketWebhookEvent(event: any): any {
-  return {
-    id: '',
-    campaignId: String(event?.campaignId ?? ''),
-    recipientEmail: String(event?.email ?? event?.recipientEmail ?? event?.recipient ?? ''),
-    type: canonicalEventType(event?.event ?? event?.type ?? 'failed'),
-    payload: {
-      _source: 'mailgun-webhook'
-    },
-    createdAt: event?.timestamp ?? new Date().toISOString()
-  }
-}
-
-function normalizeEmail(input: any): string {
-  return String(input ?? '').trim().toLowerCase()
-}
-
-function hasRealWebhookEvent(rows: any[]): boolean {
-  return rows.some((event) => event?.payload?._source === 'mailgun-webhook' && event?.payload?._simulated !== true)
-}
-
-async function fetchRecoveredHostedEventsForRecipients(recipientEmails: Set<string>): Promise<any[]> {
-  if (recipientEmails.size === 0) {
-    return []
-  }
-
-  try {
-    const campaigns = await apiClient.getCampaigns()
-    const recoveredCampaignIds = (Array.isArray(campaigns) ? campaigns : [])
-      .map((entry: any) => String(entry?.id ?? ''))
-      .filter((id: string) => id.startsWith('recovered-'))
-
-    if (recoveredCampaignIds.length === 0) {
-      return []
-    }
-
-    const rows = await Promise.all(recoveredCampaignIds.map(async (id: string) => {
-      try {
-        const events = await apiClient.getCampaignEvents(id)
-        return Array.isArray(events) ? events.map(normalizeRemoteEvent) : []
-      } catch {
-        return []
-      }
-    }))
-
-    return rows
-      .flat()
-      .filter((event) => recipientEmails.has(normalizeEmail(event?.recipientEmail)))
-  } catch {
-    return []
-  }
-}
-
-function mergeEventsUnique(localEvents: any[], remoteEvents: any[]) {
-  const merged = new Map<string, any>()
-  const keyFor = (event: any) => {
-    const idPart = String(event?.id ?? '')
-    if (idPart) {
-      return `id:${idPart}`
-    }
-    return [
-      String(event?.campaignId ?? ''),
-      String(event?.recipientEmail ?? event?.email ?? ''),
-      String(event?.type ?? event?.event ?? ''),
-      String(event?.createdAt ?? event?.timestamp ?? '')
-    ].join('|')
-  }
-
-  for (const event of [...localEvents, ...remoteEvents]) {
-    merged.set(keyFor(event), event)
-  }
-
-  return [...merged.values()].sort((left, right) => {
-    const a = new Date(String(left?.createdAt ?? left?.timestamp ?? 0)).getTime()
-    const b = new Date(String(right?.createdAt ?? right?.timestamp ?? 0)).getTime()
-    return b - a
-  })
-}
-
-function canonicalEventType(value: any): string {
-  const raw = String(value ?? '').toLowerCase()
-  if (raw === 'open') return 'opened'
-  if (raw === 'click') return 'clicked'
-  if (raw === 'bounce') return 'bounced'
-  return raw
-}
-
-function isWebhookMetricEvent(event: any): boolean {
-  const type = canonicalEventType(event?.type ?? event?.event)
-  return type === 'delivered' || type === 'opened' || type === 'clicked' || type === 'bounced' || type === 'failed' || type === 'accepted'
-}
-
-function mergeCampaignLists(localCampaigns: Campaign[], remoteCampaigns: any[]) {
-  const merged = new Map<string, Campaign>()
-  for (const campaign of localCampaigns) {
-    merged.set(campaign.id, campaign)
-  }
-  for (const campaign of remoteCampaigns) {
-    const existing = merged.get(String(campaign?.id ?? ''))
-    if (existing) {
-      merged.set(existing.id, {
-        ...existing,
-        name: campaign?.name ?? existing.name,
-        subject: campaign?.subject ?? existing.subject,
-        status: campaign?.status ?? existing.status,
-        updatedAt: campaign?.updatedAt ? String(campaign.updatedAt) : existing.updatedAt,
-        createdAt: campaign?.createdAt ? String(campaign.createdAt) : existing.createdAt
-      })
-    } else if (campaign?.id) {
-      merged.set(String(campaign.id), {
-        id: String(campaign.id),
-        name: String(campaign.name ?? 'Recovered campaign'),
-        isNewsletter: false,
-        newsletterEdition: '',
-        subject: String(campaign.subject ?? ''),
-        htmlBody: '<p>Recovered campaign.</p>',
-        textBody: 'Recovered campaign.',
-        senderEmail: '',
-        replyToEmail: '',
-        companyName: 'Mailgun',
-        headerCompanyName: 'Mailgun',
-        footerCompanyName: 'Mailgun',
-        companyAddress: '',
-        companyContact: '',
-        contactNumber: '',
-        footerContent: '',
-        cidAssets: [],
-        status: String(campaign.status ?? 'sent'),
-        createdAt: campaign.createdAt ? String(campaign.createdAt) : new Date().toISOString(),
-        updatedAt: campaign.updatedAt ? String(campaign.updatedAt) : new Date().toISOString()
-      })
-    }
-  }
-  return [...merged.values()]
 }
 
 const emptyCampaign: Partial<Campaign> = {
@@ -345,21 +145,6 @@ const emptyCampaign: Partial<Campaign> = {
   socialIconSize: 32
 }
 
-function socialIconLink(href: string | undefined, label: string, iconUrl: string, iconSize: number) {
-  if (!href || !href.trim() || !iconUrl || !iconUrl.trim()) {
-    return ''
-  }
-  return `<a href="${href}" aria-label="${label}" title="${label}" style="display:inline-block;margin:0 2px;vertical-align:middle;"><img src="${iconUrl}" alt="${label}" style="width:${iconSize}px;height:${iconSize}px;border-radius:50%;display:block;border:none;" /></a>`
-}
-
-function parseCsvPreview(text: string): { headers: string[]; rows: string[][] } {
-  const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '')
-  if (lines.length === 0) return { headers: [], rows: [] }
-  const headers = lines[0].split(',').map((entry) => entry.trim())
-  const rows = lines.slice(1, 6).map((line) => line.split(',').map((entry) => entry.trim()))
-  return { headers, rows }
-}
-
 function App() {
   const [tab, setTab] = useState<'dashboard' | 'campaign' | 'csv' | 'settings' | 'events'>('dashboard')
   const [campaigns, setCampaigns] = useState<Campaign[]>([])
@@ -385,10 +170,10 @@ function App() {
     appPassword: ''
   })
   const [selectedCampaignId, setSelectedCampaignId] = useState<string>('')
-  const [uploadSummary, setUploadSummary] = useState<any | null>(null)
+  const [uploadSummary, setUploadSummary] = useState<UploadSummary | null>(null)
   const [csvText, setCsvText] = useState('email,name,offer_code,unsubscribe_url\nuser@example.com,User,ABC123,https://example.com/unsub')
-  const [events, setEvents] = useState<any[]>([])
-  const [allEvents, setAllEvents] = useState<any[]>([])
+  const [events, setEvents] = useState<CampaignEvent[]>([])
+  const [allEvents, setAllEvents] = useState<CampaignEvent[]>([])
   const [previewMode, setPreviewMode] = useState<'desktop' | 'mobile'>('desktop')
   const [csvFileName, setCsvFileName] = useState('')
   const [newSender, setNewSender] = useState('')
@@ -417,7 +202,7 @@ function App() {
   const [actionMessage, setActionMessage] = useState('')
   const [previewHtml, setPreviewHtml] = useState('')
   const [previewGeneratedAt, setPreviewGeneratedAt] = useState('')
-  const [socialIconUrls, setSocialIconUrls] = useState<Record<string, string>>(DEFAULT_SOCIAL_ICON_URLS)
+  const [socialIconUrls, setSocialIconUrls] = useState<SocialIconUrls>(DEFAULT_SOCIAL_ICON_URLS)
   const [webhookEndpoint, setWebhookEndpoint] = useState<string>(deriveBackendWebhookEndpoint(DEFAULT_API_URL))
   const htmlBodyRef = useRef<HTMLTextAreaElement | null>(null)
   const lastInsertRef = useRef<{ body: string; snippet: string; cursor: number; at: number } | null>(null)
@@ -470,65 +255,6 @@ function App() {
       ...current,
       htmlBody: `${body.slice(0, safeCursor)}${snippet}${body.slice(safeCursor)}`
     })
-  }
-
-  function resolveCampaignImageSrc(url: string | undefined, sourceType: 'url' | 'cid' | undefined, cid: string | undefined): string {
-    if (sourceType === 'cid' && cid?.trim()) {
-      const cleanCid = cid.trim()
-      const cidFromAssets = (current.cidAssets ?? []).find((asset) => String(asset.cid ?? '').trim() === cleanCid)?.filePath
-      const slotPath = (current.logoCid === cleanCid ? current.logoPath : '')
-        || (current.bannerCid === cleanCid ? current.bannerPath : '')
-        || (current.inlineImageCid === cleanCid ? current.inlineImagePath : '')
-      const filePath = String(cidFromAssets || slotPath || '').trim()
-      if (filePath) {
-        return filePath.startsWith('file://') ? filePath : `file://${filePath}`
-      }
-      return CID_IMAGE_MISSING_DATA_URI
-    }
-    const cleanUrl = url?.trim() ?? ''
-    if (!cleanUrl) {
-      return IMAGE_MISSING_DATA_URI
-    }
-    if (cleanUrl.startsWith('data:') || cleanUrl.startsWith('file:')) {
-      return cleanUrl
-    }
-    return cleanUrl
-  }
-
-  function normalizeLinkUrl(value: string | undefined): string {
-    const raw = String(value ?? '').trim()
-    if (!raw) {
-      return ''
-    }
-    const candidate = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw) ? raw : `https://${raw}`
-    try {
-      const parsed = new URL(candidate)
-      if (!/^https?:$/i.test(parsed.protocol)) {
-        return ''
-      }
-      if (!parsed.hostname) {
-        return ''
-      }
-      return parsed.toString()
-    } catch {
-      return ''
-    }
-  }
-
-  function resolvePreviewBodyCidImages(bodyHtml: string, campaign: Partial<Campaign>): string {
-    return String(bodyHtml ?? '')
-      .replace(/(<img\b[^>]*src=["'])cid:([^"']+)(["'][^>]*>)/gi, (_match, start, cidValue, end) => {
-        const cleanCid = String(cidValue ?? '').trim()
-        const cidFromAssets = (campaign.cidAssets ?? []).find((asset) => String(asset.cid ?? '').trim() === cleanCid)?.filePath
-        const slotPath = (campaign.logoCid === cleanCid ? campaign.logoPath : '')
-          || (campaign.bannerCid === cleanCid ? campaign.bannerPath : '')
-          || (campaign.inlineImageCid === cleanCid ? campaign.inlineImagePath : '')
-        const filePath = String(cidFromAssets || slotPath || '').trim()
-        const resolvedSrc = filePath
-          ? (filePath.startsWith('file://') ? filePath : `file://${filePath}`)
-          : CID_IMAGE_MISSING_DATA_URI
-        return `${start}${resolvedSrc}${end}`
-      })
   }
 
   function setImageSourceType(field: 'logo' | 'banner' | 'inlineImage', sourceType: 'url' | 'cid') {
@@ -765,99 +491,6 @@ function App() {
     }))
   }
 
-  function renderTemplateForPreview(content: string, campaign: Partial<Campaign>): string {
-    const replacements: Record<string, string> = {
-      name: 'Jordan Lee',
-      email: 'jordan@example.com',
-      offer_code: 'OFFER-2026',
-      unsubscribe_url: 'https://example.com/unsubscribe',
-      cta_url: String(campaign.ctaUrl ?? 'https://example.com'),
-      company_name: String(campaign.companyName ?? ''),
-      header_company_name: String(campaign.headerCompanyName ?? campaign.companyName ?? ''),
-      footer_company_name: String(campaign.footerCompanyName ?? campaign.companyName ?? ''),
-      company_address: String(campaign.companyAddress ?? ''),
-      company_contact: String(campaign.companyContact ?? ''),
-      contact_number: String(campaign.contactNumber ?? ''),
-      whatsapp_url: String(campaign.whatsappUrl ?? ''),
-      youtube_url: String(campaign.youtubeUrl ?? '')
-    }
-    return String(content ?? '').replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (_, key: string) => replacements[key] ?? '')
-  }
-
-  function bodyContainsCidImage(bodyHtml: string, cid: string | undefined): boolean {
-    const cleanCid = (cid ?? '').trim()
-    if (!cleanCid) {
-      return false
-    }
-    const escapedCid = cleanCid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    return new RegExp(`<img\\b[^>]*src=["']cid:${escapedCid}["'][^>]*>`, 'i').test(bodyHtml)
-  }
-
-  function buildReceiverPreview(campaign: Partial<Campaign>): string {
-    const maxWidth = previewMode === 'mobile' ? '390px' : '720px'
-    const socialIconSize = [28, 32, 36].includes(Number(campaign.socialIconSize)) ? Number(campaign.socialIconSize) : 32
-    const body = renderTemplateForPreview(String(campaign.htmlBody ?? emptyCampaign.htmlBody), campaign)
-    const previewBody = resolvePreviewBodyCidImages(body, campaign)
-    const bodyHasLogoCid = bodyContainsCidImage(body, campaign.logoSourceType === 'cid' ? campaign.logoCid : undefined)
-    const bodyHasBannerCid = bodyContainsCidImage(body, campaign.bannerSourceType === 'cid' ? campaign.bannerCid : undefined)
-    const bodyHasFeaturedCid = bodyContainsCidImage(body, campaign.inlineImageSourceType === 'cid' ? campaign.inlineImageCid : undefined)
-    const social = [
-      socialIconLink(campaign.facebookUrl, 'Facebook', socialIconUrls.facebook || '', socialIconSize),
-      socialIconLink(campaign.instagramUrl, 'Instagram', socialIconUrls.instagram || '', socialIconSize),
-      socialIconLink(campaign.xUrl, 'X', socialIconUrls.x || '', socialIconSize),
-      socialIconLink(campaign.linkedinUrl, 'LinkedIn', socialIconUrls.linkedin || '', socialIconSize),
-      socialIconLink(campaign.whatsappUrl, 'WhatsApp', socialIconUrls.whatsapp || '', socialIconSize),
-      socialIconLink(campaign.youtubeUrl, 'YouTube', socialIconUrls.youtube || '', socialIconSize)
-    ].filter(Boolean).join('')
-    const sender = campaign.senderEmail ?? 'sender@example.com'
-    const subject = renderTemplateForPreview(String(campaign.subject ?? ''), campaign)
-    const logoSrc = resolveCampaignImageSrc(campaign.logoUrl, campaign.logoSourceType, campaign.logoCid)
-    const logoLink = normalizeLinkUrl(campaign.logoLinkUrl)
-    const bannerSrc = resolveCampaignImageSrc(campaign.bannerUrl, campaign.bannerSourceType, campaign.bannerCid)
-    const bannerLink = normalizeLinkUrl(campaign.bannerLinkUrl ?? campaign.ctaUrl)
-    const featuredSrc = resolveCampaignImageSrc(campaign.inlineImageUrl, campaign.inlineImageSourceType, campaign.inlineImageCid)
-    const featuredLink = normalizeLinkUrl(campaign.inlineImageLinkUrl)
-    const logoMarkup = logoSrc && !bodyHasLogoCid && (campaign.logoSourceType !== 'cid' || campaign.logoCid?.trim() || campaign.logoPath?.trim())
-      ? (logoLink
-          ? `<a href="${logoLink}" style="display:inline-block;text-decoration:none;"><img src="${logoSrc}" style="max-height:36px;max-width:84px;display:block;margin:0 auto 12px;" /></a>`
-          : `<img src="${logoSrc}" style="max-height:36px;max-width:84px;display:block;margin:0 auto 12px;" />`)
-      : ''
-    const bannerMarkup = bannerSrc && !bodyHasBannerCid && (campaign.bannerSourceType !== 'cid' || campaign.bannerCid?.trim() || campaign.bannerPath?.trim())
-      ? (bannerLink
-          ? `<a href="${bannerLink}" style="display:block;text-decoration:none;"><img src="${bannerSrc}" style="width:100%;border-radius:12px;display:block;margin:0 auto 14px;" /></a>`
-          : `<img src="${bannerSrc}" style="width:100%;border-radius:12px;display:block;margin:0 auto 14px;" />`)
-      : ''
-    const featuredMarkup = featuredSrc && !bodyHasFeaturedCid && (campaign.inlineImageSourceType !== 'cid' || campaign.inlineImageCid?.trim() || campaign.inlineImagePath?.trim())
-      ? (featuredLink
-          ? `<a href="${featuredLink}" style="display:block;text-decoration:none;"><img src="${featuredSrc}" style="width:100%;border-radius:12px;display:block;margin:0 auto 14px;" /></a>`
-          : `<img src="${featuredSrc}" style="width:100%;border-radius:12px;display:block;margin:0 auto 14px;" />`)
-      : ''
-    return `
-      <div style="font-family:Arial,sans-serif;background:#f7f5ef;padding:20px;color:#1b1b1b;">
-        <div style="max-width:${maxWidth};margin:0 auto;background:#ffffff;border-radius:16px;border:1px solid #eadfcb;overflow:hidden;">
-          <div style="padding:14px 16px;border-bottom:1px solid #eee;background:#faf9f6;">
-            <div style="font-size:12px;color:#666;">From: ${sender}</div>
-            <div style="font-size:12px;color:#666;">To: jordan@example.com</div>
-            <div style="font-size:13px;color:#222;margin-top:6px;"><strong>Subject:</strong> ${subject || '(no subject)'}</div>
-          </div>
-          <div style="padding:24px;text-align:center;line-height:1.6;">
-            <h2 style="margin-top:0;">${campaign.headerCompanyName || campaign.companyName || 'Company'}</h2>
-            ${logoMarkup}
-            ${bannerMarkup}
-            ${featuredMarkup}
-            ${previewBody}
-            <p style="margin-top:16px;color:#666;font-size:12px;">${campaign.footerCompanyName || campaign.companyName || ''}</p>
-            <p style="margin:2px 0;color:#666;font-size:12px;">${campaign.companyAddress ?? ''}</p>
-            <p style="margin:2px 0;color:#666;font-size:12px;">${campaign.companyContact ?? ''}</p>
-            ${campaign.contactNumber ? `<p style="margin:2px 0;color:#666;font-size:12px;"><a href="tel:${campaign.contactNumber}" style="color:#666;text-decoration:none;">${campaign.contactNumber}</a></p>` : ''}
-            <div style="margin-top:10px;">${social}</div>
-            <p style="margin-top:12px;"><a href="https://example.com/unsubscribe">Unsubscribe</a></p>
-          </div>
-        </div>
-      </div>
-    `
-  }
-
   const activeCampaign = useMemo(() => campaigns.find((entry) => entry.id === selectedCampaignId) ?? null, [campaigns, selectedCampaignId])
   const workingCampaign = useMemo(() => {
     if (!selectedCampaignId) {
@@ -867,7 +500,14 @@ function App() {
   }, [activeCampaign, current, selectedCampaignId])
 
   function generateReceiverPreview() {
-    setPreviewHtml(buildReceiverPreview(workingCampaign))
+    setPreviewHtml(buildReceiverPreview({
+      campaign: workingCampaign,
+      previewMode,
+      socialIconUrls,
+      emptyHtmlBody: emptyCampaign.htmlBody,
+      imageMissingDataUri: IMAGE_MISSING_DATA_URI,
+      cidImageMissingDataUri: CID_IMAGE_MISSING_DATA_URI
+    }))
     setPreviewGeneratedAt(new Date().toLocaleString())
   }
 
@@ -875,9 +515,16 @@ function App() {
     if (!previewGeneratedAt) {
       return
     }
-    setPreviewHtml(buildReceiverPreview(workingCampaign))
+    setPreviewHtml(buildReceiverPreview({
+      campaign: workingCampaign,
+      previewMode,
+      socialIconUrls,
+      emptyHtmlBody: emptyCampaign.htmlBody,
+      imageMissingDataUri: IMAGE_MISSING_DATA_URI,
+      cidImageMissingDataUri: CID_IMAGE_MISSING_DATA_URI
+    }))
     setPreviewGeneratedAt(new Date().toLocaleString())
-  }, [workingCampaign, previewMode])
+  }, [workingCampaign, previewMode, socialIconUrls])
 
   const csvPreview = useMemo(() => parseCsvPreview(csvText), [csvText])
 
@@ -911,11 +558,11 @@ function App() {
 
       const selectedRecipientEmails = new Set(
         (Array.isArray(selectedRecipients) ? selectedRecipients : [])
-          .map((entry: any) => normalizeEmail(entry?.email))
+          .map((entry) => normalizeEmail(entry?.email))
           .filter(Boolean)
       )
 
-      let remoteEventRows: any[] = []
+      let remoteEventRows: CampaignEvent[] = []
       try {
         const remote = await apiClient.getCampaignEvents(selectedCampaignId)
         remoteEventRows = Array.isArray(remote) ? remote.map(normalizeRemoteEvent) : []
@@ -955,10 +602,11 @@ function App() {
   useEffect(() => {
     wsClient.connect()
 
-    const unsubscribe = wsClient.on('webhook:event', async (payload: any) => {
+    const unsubscribe = wsClient.on('webhook:event', async (payload) => {
       try {
-        const campaignId = String(payload?.campaignId ?? '')
-        const liveSocketEvent = normalizeSocketWebhookEvent(payload)
+        const livePayload = (payload ?? {}) as SocketWebhookPayload
+        const campaignId = String(livePayload.campaignId ?? '')
+        const liveSocketEvent = normalizeSocketWebhookEvent(livePayload)
         if (campaignId) {
           setAllEvents((prev) => mergeEventsUnique(prev, [liveSocketEvent]))
         }
@@ -972,13 +620,9 @@ function App() {
             window.maigun.listRecipients(selectedCampaignId)
           ])
 
-          const selectedRecipientEmails = new Set(
-            (Array.isArray(selectedRecipients) ? selectedRecipients : [])
-              .map((entry: any) => normalizeEmail(entry?.email))
-              .filter(Boolean)
-          )
+          const selectedRecipientEmails = buildRecipientEmailSet(Array.isArray(selectedRecipients) ? selectedRecipients : [])
 
-          let remoteEventRows: any[] = []
+          let remoteEventRows: CampaignEvent[] = []
           try {
             const remote = await apiClient.getCampaignEvents(selectedCampaignId)
             remoteEventRows = Array.isArray(remote) ? remote.map(normalizeRemoteEvent) : []
@@ -1026,29 +670,17 @@ function App() {
           return
         }
 
-        const remoteEventRows = await Promise.all(remoteCampaignList.map(async (entry: any) => {
-          const campaignId = String(entry?.id ?? '')
-          if (!campaignId) {
-            return []
-          }
-          try {
-            const events = await apiClient.getCampaignEvents(campaignId)
-            return Array.isArray(events) ? events.map(normalizeRemoteEvent) : []
-          } catch {
-            return []
-          }
-        }))
+        const flatRemoteEvents = await fetchRemoteCampaignEvents(remoteCampaignList)
 
         if (!isActive) {
           return
         }
 
-        const flatRemoteEvents = remoteEventRows.flat()
         setCampaigns((prev) => mergeCampaignLists(prev, remoteCampaignList))
         setAllEvents((prev) => {
           const merged = mergeEventsUnique(prev, flatRemoteEvents)
           if (selectedCampaignId) {
-            setEvents(merged.filter((entry: any) => String(entry?.campaignId ?? '') === selectedCampaignId))
+            setEvents(merged.filter((entry) => String(entry?.campaignId ?? '') === selectedCampaignId))
           }
           return merged
         })
@@ -1085,16 +717,12 @@ function App() {
       const localCampaignList = Array.isArray(loadedCampaigns) ? loadedCampaigns : []
       const localEventList = Array.isArray(loadedAllEvents) ? loadedAllEvents : []
 
-      let remoteCampaignList: any[] = []
-      let remoteEventList: any[] = []
+      let remoteCampaignList: Array<Partial<Campaign>> = []
+      let remoteEventList: CampaignEvent[] = []
       try {
         remoteCampaignList = await apiClient.getCampaigns()
         if (Array.isArray(remoteCampaignList) && remoteCampaignList.length > 0) {
-          const remoteEventRows = await Promise.all(remoteCampaignList.map(async (entry: any) => {
-            const events = await apiClient.getCampaignEvents(String(entry.id))
-            return Array.isArray(events) ? events.map(normalizeRemoteEvent) : []
-          }))
-          remoteEventList = remoteEventRows.flat()
+          remoteEventList = await fetchRemoteCampaignEvents(remoteCampaignList)
         }
       } catch {
         remoteCampaignList = []
@@ -1108,12 +736,8 @@ function App() {
       setAllEvents(mergedEvents)
       if (selectedCampaignId) {
         const selectedRecipients = await window.maigun.listRecipients(selectedCampaignId)
-        const selectedRecipientEmails = new Set(
-          (Array.isArray(selectedRecipients) ? selectedRecipients : [])
-            .map((entry: any) => normalizeEmail(entry?.email))
-            .filter(Boolean)
-        )
-        const selectedEvents = mergedEvents.filter((entry: any) => {
+        const selectedRecipientEmails = buildRecipientEmailSet(Array.isArray(selectedRecipients) ? selectedRecipients : [])
+        const selectedEvents = mergedEvents.filter((entry) => {
           const entryCampaignId = String(entry?.campaignId ?? '')
           if (entryCampaignId === selectedCampaignId) {
             return true
@@ -1125,11 +749,7 @@ function App() {
         })
         setEvents(selectedEvents)
       }
-      const progressRows = await Promise.all(mergedCampaigns.map(async (entry: any) => {
-        const pg = await window.maigun.getCampaignProgress(entry.id)
-        return [entry.id, pg] as const
-      }))
-      setCampaignProgressMap(Object.fromEntries(progressRows))
+      setCampaignProgressMap(await fetchCampaignProgressMap(mergedCampaigns))
       setSettings(loadedSettings)
       if (loadedSettings.appUsername && loadedSettings.appPassword) {
         setAuthMode('login')
@@ -1162,7 +782,8 @@ function App() {
     setSelectedCampaignId(created.id)
     setCurrent(created)
     await window.maigun.saveDraft(created)
-    setActionMessage('Campaign created successfully.')
+    const hostedSync = await syncCampaignToHosted(created)
+    setActionMessage(hostedSync.ok ? 'Campaign created successfully.' : `Campaign created locally. Hosted sync failed: ${hostedSync.error}`)
     await refresh()
   }
 
@@ -1171,7 +792,8 @@ function App() {
     const toSave = { ...(activeCampaign ?? current), ...current, id: selectedCampaignId }
     await window.maigun.saveCampaign(toSave)
     await window.maigun.saveDraft(toSave)
-    setActionMessage('Campaign saved.')
+    const hostedSync = await syncCampaignToHosted(toSave)
+    setActionMessage(hostedSync.ok ? 'Campaign saved.' : `Campaign saved locally. Hosted sync failed: ${hostedSync.error}`)
     await refresh()
   }
 
@@ -1196,7 +818,16 @@ function App() {
     if (!selectedCampaignId) return
     const summary = await window.maigun.importCsv(selectedCampaignId, buildMappedCsv())
     setUploadSummary(summary)
-    setActionMessage('CSV imported successfully.')
+    const campaignForSync = { ...(activeCampaign ?? current), ...current, id: selectedCampaignId }
+    const hostedCampaignSync = await syncCampaignToHosted(campaignForSync)
+    if (!hostedCampaignSync.ok) {
+      setActionMessage(`CSV imported locally. Hosted campaign sync failed: ${hostedCampaignSync.error}`)
+      await refresh()
+      return
+    }
+
+    const hostedRecipientSync = await syncRecipientsToHosted(selectedCampaignId, Array.isArray(summary?.rows) ? summary.rows : [])
+    setActionMessage(hostedRecipientSync.ok ? 'CSV imported successfully.' : `CSV imported locally. Hosted recipient sync failed: ${hostedRecipientSync.error}`)
     await refresh()
   }
 
@@ -1205,20 +836,7 @@ function App() {
   }
 
   function buildMappedCsv(): string {
-    const { headers, rows } = csvPreview
-    if (headers.length === 0) return csvText
-    const mappedHeaders = ['email', 'name', 'offer_code', 'unsubscribe_url']
-    const mappedRows = rows.map((row) => {
-      const rowMap = Object.fromEntries(headers.map((header, idx) => [header, row[idx] ?? '']))
-      return mappedHeaders.map((target) => rowMap[fieldMap[target] ?? ''] ?? '')
-    })
-    const fullRows = csvText.split(/\r?\n/).slice(1).filter((line) => line.trim() !== '')
-    const transformed = fullRows.map((line) => {
-      const values = line.split(',').map((entry) => entry.trim())
-      const rowMap = Object.fromEntries(headers.map((header, idx) => [header, values[idx] ?? '']))
-      return mappedHeaders.map((target) => rowMap[fieldMap[target] ?? ''] ?? '').join(',')
-    })
-    return [mappedHeaders.join(','), ...transformed].join('\n')
+    return mapCsvText(csvText, fieldMap)
   }
 
   async function loadCsvFile(file: File) {
@@ -1252,13 +870,33 @@ function App() {
         return
       }
     }
-    const result = await window.maigun.sendTestEmail(campaignId, candidate, workingCampaign)
-    if (result?.ok) {
+    const hostedCampaign = { ...(workingCampaign ?? current), id: campaignId }
+    const hostedReady = await ensureHostedCampaignReady(hostedCampaign, false)
+    let sentViaHosted = false
+    let hostedError = ''
+    let result: LocalSendResult | HostedSendResult | null = null
+
+    if (hostedReady.ok) {
+      try {
+        result = await apiClient.sendTestEmail(campaignId, candidate)
+        sentViaHosted = Boolean(result?.sent)
+      } catch (error) {
+        hostedError = (error as Error)?.message || 'Unknown hosted send-test error'
+      }
+    } else {
+      hostedError = hostedReady.error
+    }
+
+    if (!sentViaHosted) {
+      result = await window.maigun.sendTestEmail(campaignId, candidate, workingCampaign)
+    }
+
+    if (result?.ok || result?.sent) {
       const nextRecent = [candidate, ...(settings.recentTestEmails ?? []).filter((email) => email.toLowerCase() !== candidate.toLowerCase())].slice(0, 5)
       const nextSettings = { ...settings, recentTestEmails: nextRecent }
       setSettings(nextSettings)
       await window.maigun.saveSettings(nextSettings)
-      setActionMessage('Test email sent.')
+      setActionMessage(sentViaHosted ? 'Test email sent via hosted backend.' : hostedError ? `Test email sent locally. Hosted send failed: ${hostedError}` : 'Test email sent locally.')
     } else {
       setActionMessage(`Test email failed: ${result?.error ?? 'Unknown error'}`)
     }
@@ -1270,21 +908,42 @@ function App() {
     if (!ensureCidReadyForSend(candidateCampaign)) {
       return
     }
-    const result = await window.maigun.sendCampaign(selectedCampaignId, candidateCampaign)
+    const hostedReady = await ensureHostedCampaignReady(candidateCampaign, true)
+    let sentViaHosted = false
+    let hostedError = ''
+    let result: LocalSendResult | HostedSendResult | null = null
+
+    if (hostedReady.ok) {
+      try {
+        result = await apiClient.sendCampaign(selectedCampaignId)
+        sentViaHosted = typeof result?.total === 'number'
+      } catch (error) {
+        hostedError = (error as Error)?.message || 'Unknown hosted send error'
+      }
+    } else {
+      hostedError = hostedReady.error
+    }
+
+    if (!sentViaHosted) {
+      result = await window.maigun.sendCampaign(selectedCampaignId, candidateCampaign)
+    }
+
     setShowConfirm(false)
-    if (result?.noRecipients) {
+    if (!sentViaHosted && result?.noRecipients) {
       setActionMessage('No recipients found. Please import CSV recipients first, then send campaign.')
       return
     }
-    if (result?.noDeliverableRecipients) {
+    if (!sentViaHosted && result?.noDeliverableRecipients) {
       setActionMessage('All recipients are suppressed or non-deliverable. Update recipient list and try again.')
       return
     }
-    if (result?.scheduled) {
+    if (!sentViaHosted && result?.scheduled) {
       const when = activeCampaign?.scheduledAt ? new Date(activeCampaign.scheduledAt).toLocaleString() : 'selected time'
       setActionMessage(`Campaign scheduled. It will start automatically at ${when}.`)
+    } else if (sentViaHosted) {
+      setActionMessage(`Campaign sent via hosted backend. Sent ${result?.sent ?? 0} of ${result?.total ?? 0} recipients${result?.failed ? `, ${result.failed} failed` : ''}.`)
     } else {
-      setActionMessage('Campaign queued for sending now.')
+      setActionMessage(hostedError ? `Campaign queued locally. Hosted send failed: ${hostedError}` : 'Campaign queued for sending now.')
     }
     await refresh()
   }
@@ -1446,14 +1105,6 @@ function App() {
     }
   }
 
-  useEffect(() => {
-    if (!previewGeneratedAt) {
-      return
-    }
-    generateReceiverPreview()
-    // Regenerate rendered view for selected device mode only after preview has been requested.
-  }, [previewMode])
-
   const campaignPerformanceRows = useMemo(() => {
     return campaigns.map((campaign) => {
       const pg = campaignProgressMap[campaign.id] ?? { total: 0, queued: 0, sent: 0, failed: 0, suppressed: 0, inProgress: 0, percent: 0 }
@@ -1549,92 +1200,65 @@ function App() {
     }
   }, [events, allEvents, selectedCampaignId])
 
-  if (!isAuthenticated && authMode === 'loading') {
+  if (!isAuthenticated) {
     return (
-      <main className="main" style={{ display: 'grid', placeItems: 'center', height: '100vh' }}>
-        <section className="card" style={{ width: 460 }}>
-          <h2>Loading</h2>
-          <div className="muted">Checking account configuration...</div>
-        </section>
-      </main>
-    )
-  }
-
-  if (!isAuthenticated && authMode === 'setup') {
-    return (
-      <main className="main" style={{ display: 'grid', placeItems: 'center', height: '100vh' }}>
-        <section className="card" style={{ width: 460 }}>
-          <h2>Create Admin Account</h2>
-          <label>Username</label>
-          <input value={setupUsername} onChange={(event) => setSetupUsername(event.target.value)} />
-          <label>Password</label>
-          <input type="password" value={setupPassword} onChange={(event) => setSetupPassword(event.target.value)} />
-          <label>Confirm password</label>
-          <input type="password" value={setupConfirmPassword} onChange={(event) => setSetupConfirmPassword(event.target.value)} />
-          {authError ? <div className="danger" style={{ marginTop: 8 }}>{authError}</div> : null}
-          <div className="row" style={{ marginTop: 12 }}>
-            <button className="button" disabled={authBusy} onClick={async () => {
-              if (!window.maigun?.saveSettings) {
-                setAuthError('App bridge is unavailable. Please close and reopen the app.')
-                return
-              }
-              if (!setupUsername.trim() || !setupPassword.trim()) {
-                setAuthError('Username and password are required.')
-                return
-              }
-              if (setupPassword !== setupConfirmPassword) {
-                setAuthError('Passwords do not match.')
-                return
-              }
-              setAuthBusy(true)
-              try {
-                const next = {
-                  ...settings,
-                  appUsername: setupUsername.trim(),
-                  appPassword: setupPassword
-                }
-                const saved = await window.maigun.saveSettings(next)
-                setSettings(saved)
-                setLoginUsername(saved.appUsername)
-                setLoginPassword('')
-                setSetupPassword('')
-                setSetupConfirmPassword('')
-                setAuthError('Account created. Please sign in.')
-                setAuthMode('login')
-              } catch (error) {
-                setAuthError(`Unable to create account: ${(error as Error).message}`)
-              } finally {
-                setAuthBusy(false)
-              }
-            }}>{authBusy ? 'Creating...' : 'Create account'}</button>
-          </div>
-        </section>
-      </main>
-    )
-  }
-
-  if (!isAuthenticated && authMode === 'login') {
-    return (
-      <main className="main" style={{ display: 'grid', placeItems: 'center', height: '100vh' }}>
-        <section className="card" style={{ width: 460 }}>
-          <h2>Login</h2>
-          <label>Username</label>
-          <input value={loginUsername} onChange={(event) => setLoginUsername(event.target.value)} />
-          <label>App password</label>
-          <input type="password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} />
-          {authError ? <div className="danger" style={{ marginTop: 8 }}>{authError}</div> : null}
-          <div className="row" style={{ marginTop: 12 }}>
-            <button className="button" onClick={() => {
-              if (loginUsername.trim() === settings.appUsername && loginPassword === settings.appPassword) {
-                setIsAuthenticated(true)
-                setAuthError('')
-              } else {
-                setAuthError('Invalid username or password')
-              }
-            }}>Sign in</button>
-          </div>
-        </section>
-      </main>
+      <AuthGate
+        mode={authMode}
+        authError={authError}
+        authBusy={authBusy}
+        setupUsername={setupUsername}
+        setSetupUsername={setSetupUsername}
+        setupPassword={setupPassword}
+        setSetupPassword={setSetupPassword}
+        setupConfirmPassword={setupConfirmPassword}
+        setSetupConfirmPassword={setSetupConfirmPassword}
+        loginUsername={loginUsername}
+        setLoginUsername={setLoginUsername}
+        loginPassword={loginPassword}
+        setLoginPassword={setLoginPassword}
+        onCreateAccount={async () => {
+          if (!window.maigun?.saveSettings) {
+            setAuthError('App bridge is unavailable. Please close and reopen the app.')
+            return
+          }
+          if (!setupUsername.trim() || !setupPassword.trim()) {
+            setAuthError('Username and password are required.')
+            return
+          }
+          if (setupPassword !== setupConfirmPassword) {
+            setAuthError('Passwords do not match.')
+            return
+          }
+          setAuthBusy(true)
+          try {
+            const next = {
+              ...settings,
+              appUsername: setupUsername.trim(),
+              appPassword: setupPassword
+            }
+            const saved = await window.maigun.saveSettings(next)
+            setSettings(saved)
+            setLoginUsername(saved.appUsername)
+            setLoginPassword('')
+            setSetupPassword('')
+            setSetupConfirmPassword('')
+            setAuthError('Account created. Please sign in.')
+            setAuthMode('login')
+          } catch (error) {
+            setAuthError(`Unable to create account: ${(error as Error).message}`)
+          } finally {
+            setAuthBusy(false)
+          }
+        }}
+        onSignIn={() => {
+          if (loginUsername.trim() === settings.appUsername && loginPassword === settings.appPassword) {
+            setIsAuthenticated(true)
+            setAuthError('')
+          } else {
+            setAuthError('Invalid username or password')
+          }
+        }}
+      />
     )
   }
 
@@ -2009,39 +1633,27 @@ function App() {
                 </div>
               </div>
 
-              <div className="row wrap" style={{ marginTop: 12 }}>
-                <button className="button" onClick={() => void createCampaign()}>Create campaign</button>
-                <button className="button secondary" onClick={() => void saveCampaign()}>Save campaign</button>
-                {(current.logoUrl || current.logoPath || current.logoCid) ? <button className="button secondary" onClick={() => removeImage('logoUrl')}>Remove logo</button> : null}
-                {(current.bannerUrl || current.bannerPath || current.bannerCid) ? <button className="button secondary" onClick={() => removeImage('bannerUrl')}>Remove banner</button> : null}
-                {(current.inlineImageUrl || current.inlineImagePath || current.inlineImageCid) ? <button className="button secondary" onClick={() => removeImage('inlineImageUrl')}>Remove featured body image</button> : null}
-              </div>
-              {validationError ? <div className="danger" style={{ marginTop: 8 }}>{validationError}</div> : null}
-
-              <div className="row wrap" style={{ marginTop: 12 }}>
-                <input placeholder="test@example.com" value={testEmail} onChange={(event) => setTestEmail(event.target.value)} />
-                <button className="button secondary" onClick={() => void sendTest()}>Send Test Email</button>
-              </div>
-              {(settings.recentTestEmails ?? []).length > 0 ? (
-                <div className="row wrap" style={{ marginTop: 8 }}>
-                  {(settings.recentTestEmails ?? []).map((email) => (
-                    <button key={email} className="button secondary" onClick={() => setTestEmail(email)}>{email}</button>
-                  ))}
-                </div>
-              ) : null}
+              <CampaignActionsPanel
+                current={current}
+                validationError={validationError}
+                createCampaign={createCampaign}
+                saveCampaign={saveCampaign}
+                removeImage={removeImage}
+                testEmail={testEmail}
+                setTestEmail={setTestEmail}
+                sendTest={sendTest}
+                recentTestEmails={settings.recentTestEmails ?? []}
+              />
 
             </div>
 
-            <div className="card">
-              <h3>Receiver POV Preview</h3>
-              <div className="row wrap" style={{ marginBottom: 10 }}>
-                <button className={`button ${previewMode === 'desktop' ? '' : 'secondary'}`} onClick={() => setPreviewMode('desktop')}>Desktop</button>
-                <button className={`button ${previewMode === 'mobile' ? '' : 'secondary'}`} onClick={() => setPreviewMode('mobile')}>Mobile</button>
-                <button className="button" onClick={generateReceiverPreview}>Generate preview</button>
-              </div>
-              {previewGeneratedAt ? <div className="muted" style={{ marginBottom: 8 }}>Generated: {previewGeneratedAt}</div> : <div className="muted" style={{ marginBottom: 8 }}>Click Generate preview to see exactly how receiver will view this email.</div>}
-              <div className="preview"><iframe title="preview" srcDoc={previewHtml || '<div style="padding:20px;font-family:Arial,sans-serif;color:#555;">No preview generated yet.</div>'} /></div>
-            </div>
+            <PreviewPanel
+              previewMode={previewMode}
+              setPreviewMode={setPreviewMode}
+              generateReceiverPreview={generateReceiverPreview}
+              previewGeneratedAt={previewGeneratedAt}
+              previewHtml={previewHtml}
+            />
             <div className="card">
               <h3>{docForTab('campaign').title}</h3>
               {docForTab('campaign').lines.map((line) => <div key={line} className="muted" style={{ marginBottom: 8 }}>{line}</div>)}
@@ -2050,107 +1662,37 @@ function App() {
         )}
 
         {tab === 'csv' && (
-          <section className="grid">
-            <div className="card">
-              <h2>CSV mapping and preview</h2>
-              <input type="file" accept=".csv,text/csv" onChange={(event) => {
-                const file = event.target.files?.[0]
-                if (file) void loadCsvFile(file)
-              }} />
-              <div className="muted" style={{ marginTop: 8 }}>{csvFileName ? `Loaded ${csvFileName}` : 'No file selected'}</div>
-              <textarea value={csvText} onChange={(event) => setCsvText(event.target.value)} style={{ minHeight: 240 }} />
-
-              <div className="grid" style={{ marginTop: 10 }}>
-                {['email', 'name', 'offer_code', 'unsubscribe_url'].map((target) => (
-                  <div key={target}>
-                    <label>Map {target}</label>
-                    <select value={fieldMap[target] ?? ''} onChange={(event) => setFieldMap({ ...fieldMap, [target]: event.target.value })}>
-                      <option value="">None</option>
-                      {csvPreview.headers.map((header) => <option key={header} value={header}>{header}</option>)}
-                    </select>
-                  </div>
-                ))}
-              </div>
-
-              <div className="row wrap" style={{ marginTop: 12 }}>
-                <button className="button secondary" onClick={() => void previewCsv()}>Validate</button>
-                <button className="button" onClick={() => void importCsv()}>Import</button>
-              </div>
-            </div>
-
-            <div className="card">
-              <h3>First 5 rows</h3>
-              <pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(csvPreview.rows, null, 2)}</pre>
-              {uploadSummary ? (
-                <>
-                  <h3>Validation summary</h3>
-                  <div className="grid three">
-                    <div className="stat"><strong>{uploadSummary.validCount}</strong><span>Valid</span></div>
-                    <div className="stat"><strong>{uploadSummary.invalidCount}</strong><span>Invalid</span></div>
-                    <div className="stat"><strong>{uploadSummary.duplicateCount}</strong><span>Duplicates</span></div>
-                  </div>
-                </>
-              ) : null}
-            </div>
-            <div className="card">
-              <h3>{docForTab('csv').title}</h3>
-              {docForTab('csv').lines.map((line) => <div key={line} className="muted" style={{ marginBottom: 8 }}>{line}</div>)}
-            </div>
-          </section>
+          <CsvPanel
+            csvFileName={csvFileName}
+            csvText={csvText}
+            setCsvText={setCsvText}
+            loadCsvFile={loadCsvFile}
+            fieldMap={fieldMap}
+            setFieldMap={setFieldMap}
+            csvPreview={csvPreview}
+            previewCsv={previewCsv}
+            importCsv={importCsv}
+            uploadSummary={uploadSummary}
+            docTitle={docForTab('csv').title}
+            docLines={docForTab('csv').lines}
+          />
         )}
 
         {tab === 'settings' && (
-          <section className="card">
-            <h2>Settings</h2>
-            <div className="grid">
-              <div><label>App username</label><input value={settings.appUsername} onChange={(event) => setSettings({ ...settings, appUsername: event.target.value })} /></div>
-              <div><label>App password</label><input type="password" value={settings.appPassword} onChange={(event) => setSettings({ ...settings, appPassword: event.target.value })} /></div>
-              <div>
-                <label>Add sender profile</label>
-                <div className="row">
-                  <input value={newSender} onChange={(event) => setNewSender(event.target.value)} placeholder="sales@domain.com" />
-                  <button className="button secondary" onClick={() => {
-                    const candidate = newSender.trim()
-                    if (!candidate) {
-                      setActionMessage('Please enter a sender email first.')
-                      return
-                    }
-                    if (!settings.senderEmails.includes(candidate)) {
-                      setSettings({ ...settings, senderEmails: [...settings.senderEmails, candidate] })
-                      setActionMessage(`Sender added: ${candidate}`)
-                    } else {
-                      setActionMessage('Sender already exists.')
-                    }
-                    setNewSender('')
-                  }}>Add</button>
-                </div>
-                <div className="row wrap" style={{ marginTop: 8 }}>
-                  {settings.senderEmails.map((sender) => (
-                    <button key={sender} className="button secondary" onClick={() => {
-                      setSettings({ ...settings, senderEmails: settings.senderEmails.filter((item) => item !== sender) })
-                      setActionMessage(`Sender removed: ${sender}`)
-                    }}>{sender} x</button>
-                  ))}
-                </div>
-              </div>
-            </div>
-            <div className="card" style={{ marginTop: 12 }}>
-              <h3>Hosted backend mode</h3>
-              <div className="muted" style={{ marginBottom: 8 }}>Mailgun, webhook, and provider credentials are managed on the backend service (Render).</div>
-              <div className="muted">Frontend only needs login fields and sender profile convenience values.</div>
-            </div>
-            <div className="row wrap" style={{ marginTop: 12 }}>
-              <button className="button" onClick={async () => {
-                const saved = await window.maigun.saveSettings(settings)
-                setSettings(saved)
-                setActionMessage('Settings saved successfully.')
-              }}>Save settings</button>
-            </div>
-            <div className="card" style={{ marginTop: 12 }}>
-              <h3>{docForTab('settings').title}</h3>
-              {docForTab('settings').lines.map((line) => <div key={line} className="muted" style={{ marginBottom: 8 }}>{line}</div>)}
-            </div>
-          </section>
+          <SettingsPanel
+            settings={settings}
+            setSettings={setSettings}
+            newSender={newSender}
+            setNewSender={setNewSender}
+            setActionMessage={setActionMessage}
+            saveSettings={async () => {
+              const saved = await window.maigun.saveSettings(settings)
+              setSettings(saved)
+              setActionMessage('Settings saved successfully.')
+            }}
+            docTitle={docForTab('settings').title}
+            docLines={docForTab('settings').lines}
+          />
         )}
 
         {tab === 'events' && (

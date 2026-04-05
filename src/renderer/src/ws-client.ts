@@ -1,12 +1,13 @@
 // WebSocket client for realtime events
 import { io, Socket } from 'socket.io-client'
+import type { SocketWebhookPayload } from './types'
 
 const DEFAULT_WS_URL = process.env.REACT_APP_WS_URL || 'https://maller-backend-1.onrender.com'
 
 export class WebSocketClient {
   private socket: Socket | null = null
   private wsUrl: string
-  private listeners: Record<string, Function[]> = {}
+  private listeners: Record<string, Array<(data?: unknown) => void>> = {}
 
   constructor(wsUrl: string = DEFAULT_WS_URL) {
     this.wsUrl = wsUrl
@@ -58,7 +59,7 @@ export class WebSocketClient {
     }
   }
 
-  on(event: string, callback: Function) {
+  on(event: string, callback: (data?: unknown) => void) {
     if (!this.listeners[event]) {
       this.listeners[event] = []
     }
@@ -72,7 +73,7 @@ export class WebSocketClient {
     }
   }
 
-  private emit(event: string, data?: any) {
+  private emit(event: string, data?: unknown) {
     if (this.listeners[event]) {
       this.listeners[event].forEach((callback) => callback(data))
     }

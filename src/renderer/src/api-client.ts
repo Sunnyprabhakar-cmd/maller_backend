@@ -1,10 +1,12 @@
+import type { Campaign, CampaignEvent, HostedRecipient } from './types'
+
 // API Client for Electron app to communicate with backend
 const DEFAULT_API_URL = process.env.REACT_APP_API_URL || 'https://maller-backend-1.onrender.com/api'
 const API_TOKEN = process.env.REACT_APP_API_TOKEN || 'dev-token-12345'
 
-interface ApiOptions {
+interface ApiOptions<TBody = unknown> {
   method?: string
-  body?: any
+  body?: TBody
 }
 
 export class ApiClient {
@@ -16,7 +18,7 @@ export class ApiClient {
     this.apiToken = apiToken
   }
 
-  private async request(endpoint: string, options: ApiOptions = {}) {
+  private async request<TResponse = unknown, TBody = unknown>(endpoint: string, options: ApiOptions<TBody> = {}): Promise<TResponse> {
     const url = `${this.apiUrl}${endpoint}`
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -38,7 +40,7 @@ export class ApiClient {
   }
 
   // Campaigns
-  async createCampaign(campaign: any) {
+  async createCampaign(campaign: Partial<Campaign>) {
     return this.request('/campaigns', {
       method: 'POST',
       body: campaign
@@ -46,14 +48,21 @@ export class ApiClient {
   }
 
   async getCampaigns() {
-    return this.request('/campaigns')
+    return this.request<Partial<Campaign>[]>('/campaigns')
   }
 
   async getCampaign(id: string) {
-    return this.request(`/campaigns/${id}`)
+    return this.request<Partial<Campaign>>(`/campaigns/${id}`)
   }
 
-  async addRecipients(campaignId: string, recipients: any[]) {
+  async updateCampaign(id: string, campaign: Partial<Campaign>) {
+    return this.request(`/campaigns/${id}`, {
+      method: 'PUT',
+      body: campaign
+    })
+  }
+
+  async addRecipients(campaignId: string, recipients: HostedRecipient[]) {
     return this.request(`/campaigns/${campaignId}/recipients`, {
       method: 'POST',
       body: { recipients }
@@ -74,7 +83,7 @@ export class ApiClient {
   }
 
   async getCampaignEvents(campaignId: string) {
-    return this.request(`/campaigns/${campaignId}/events`)
+    return this.request<CampaignEvent[]>(`/campaigns/${campaignId}/events`)
   }
 
   // Tokens

@@ -11,15 +11,49 @@ datasource db {
 }
 
 model Campaign {
-  id        String   @id @default(cuid())
-  name      String
-  subject   String
-  template  String   @db.Text
-  csvData   String?  @db.Text
-  sourceType String  @default("cid") // "cid" or "url"
-  imageUrl  String?
-  imageCid  String?
-  webhookUrl String?
+  id                    String   @id @default(cuid())
+  name                  String
+  subject               String
+  status                String   @default("draft")
+  template              String   @db.Text
+  htmlBody              String?  @db.Text
+  textBody              String?  @db.Text
+  csvData               String?  @db.Text
+  isNewsletter          Boolean  @default(false)
+  newsletterEdition     String   @default("")
+  senderEmail           String?
+  replyToEmail          String?
+  companyName           String?
+  headerCompanyName     String?
+  footerCompanyName     String?
+  companyAddress        String?
+  companyContact        String?
+  contactNumber         String?
+  footerContent         String?  @db.Text
+  sourceType            String   @default("cid") // legacy banner source type
+  imageUrl              String?
+  imageCid              String?
+  logoSourceType        String?
+  logoUrl               String?
+  logoLinkUrl           String?
+  logoCid               String?
+  bannerSourceType      String?
+  bannerUrl             String?
+  bannerLinkUrl         String?
+  bannerCid             String?
+  inlineImageSourceType String?
+  inlineImageUrl        String?
+  inlineImageLinkUrl    String?
+  inlineImageCid        String?
+  ctaUrl                String?
+  facebookUrl           String?
+  instagramUrl          String?
+  xUrl                  String?
+  linkedinUrl           String?
+  whatsappUrl           String?
+  youtubeUrl            String?
+  socialIconSize        Int      @default(32)
+  webhookUrl            String?
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

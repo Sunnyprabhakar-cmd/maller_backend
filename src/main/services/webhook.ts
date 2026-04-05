@@ -312,7 +312,25 @@ function verifyWebhookSignature(
   storage: StorageService,
   signature: { timestamp: string; token: string; signature: string } | undefined
 ): boolean {
-  return true
+  if (!signature?.timestamp || !signature.token || !signature.signature) {
+    return false
+  }
+
+  const webhookSecret = storage.getSettings().webhookSecret?.trim()
+  if (!webhookSecret) {
+    return false
+  }
+
+  const expected = createHmac('sha256', webhookSecret)
+    .update(`${signature.timestamp}${signature.token}`)
+    .digest('hex')
+
+  const provided = String(signature.signature).trim().toLowerCase()
+  if (expected.length !== provided.length) {
+    return false
+  }
+
+  return timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(provided, 'utf8'))
 }
 
 function createServerForPort(storage: StorageService, options?: WebhookStartOptions): ReturnType<typeof createServer> {

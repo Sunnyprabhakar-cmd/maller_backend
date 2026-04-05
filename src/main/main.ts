@@ -60,7 +60,6 @@ app.on('activate', () => {
 })
 
 ipcMain.handle('app:get-state', () => storage.getState())
-ipcMain.handle('webhook:port', () => null)
 
 ipcMain.handle('campaign:create', (_event, input: Partial<Campaign>) => {
   const now = new Date().toISOString()

@@ -1,19 +1,51 @@
 import DOMPurify from 'isomorphic-dompurify'
+import {
+  normalizeLinkUrl,
+  compactFragment,
+  bodyContainsCidImage,
+  interpolateTemplate,
+  buildWrappedEmailHtml,
+  buildInterpolatedTextFallback
+} from '../shared/email-layout.js'
 
 interface BuildEmailHtmlOptions {
-  template: string
+  template?: string
+  htmlBody?: string
+  textBody?: string
   data: Record<string, any>
+  sourceType?: 'cid' | 'url'
   imageUrl?: string
   imageCid?: string
-  sourceType: 'cid' | 'url'
-  logoText?: string
+  logoSourceType?: 'cid' | 'url'
+  logoUrl?: string
+  logoCid?: string
+  logoLinkUrl?: string
+  bannerSourceType?: 'cid' | 'url'
+  bannerUrl?: string
+  bannerCid?: string
+  bannerLinkUrl?: string
+  inlineImageSourceType?: 'cid' | 'url'
+  inlineImageUrl?: string
+  inlineImageCid?: string
+  inlineImageLinkUrl?: string
+  companyName?: string
+  headerCompanyName?: string
+  footerCompanyName?: string
+  companyAddress?: string
+  companyContact?: string
+  contactNumber?: string
+  footerContent?: string
+  ctaUrl?: string
+  facebookUrl?: string
+  instagramUrl?: string
+  xUrl?: string
+  linkedinUrl?: string
+  whatsappUrl?: string
+  youtubeUrl?: string
+  socialIconSize?: number
+  isNewsletter?: boolean
+  newsletterEdition?: string
   webhookUrl?: string
-}
-
-const SOCIAL_ICONS: Record<string, string> = {
-  facebook: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%231877F2"%3E%3Cpath d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/%3E%3C/svg%3E',
-  twitter: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%231DA1F2"%3E%3Cpath d="M23.953 4.57a10 10 0 002.856-3.513 9.957 9.957 0 01-2.784.756 4.994 4.994 0 002.163-2.723c-.951.555-2.005.959-3.127 1.184a4.92 4.92 0 00-8.384 4.482C7.69 8.095 4.067 6.13 1.64 3.162a4.822 4.822 0 00-.666 2.475c0 1.71.87 3.213 2.188 4.096a4.904 4.904 0 01-2.228-.616v.06a4.923 4.923 0 003.946 4.827 4.996 4.996 0 01-2.212.085 4.936 4.936 0 004.604 3.417 9.867 9.867 0 01-6.102 2.105c-.39 0-.779-.023-1.17-.067a13.995 13.995 0 007.557 2.209c9.053 0 13.998-7.496 13.998-13.985 0-.21 0-.42-.015-.63A9.935 9.935 0 0024 4.59z"/%3E%3C/svg%3E',
-  linkedin: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%230A66C2"%3E%3Cpath d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.225 0z"/%3E%3C/svg%3E'
 }
 
 function resolveImageSrc(sourceType: string, imageUrl?: string, imageCid?: string): string {
@@ -26,77 +58,95 @@ function resolveImageSrc(sourceType: string, imageUrl?: string, imageCid?: strin
   return ''
 }
 
-function normalizeLinkUrl(url: string): string {
-  if (!url) return ''
-  if (url.startsWith('http://') || url.startsWith('https://')) {
-    return url
+function buildSocialLink(href: string | undefined, label: string, size: number): string {
+  const url = normalizeLinkUrl(String(href || ''))
+  if (!url) {
+    return ''
   }
-  if (url.startsWith('www.')) {
-    return `https://${url}`
-  }
-  // Bare domain
-  if (/^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]?(\.[a-zA-Z]{2,})+$/.test(url)) {
-    return `https://${url}`
-  }
-  return ''
-}
-
-function interpolateTemplate(template: string, data: Record<string, any>): string {
-  let html = template
-  for (const [key, value] of Object.entries(data)) {
-    const regex = new RegExp(`\\{\\{${key}\\}\\}`, 'g')
-    html = html.replace(regex, String(value || ''))
-  }
-  return html
+  return `<a href="${url}" aria-label="${label}" title="${label}" style="display:inline-block;margin:0 4px;padding:0 10px;height:${size}px;line-height:${size}px;border-radius:999px;background:#f5efea;border:1px solid #d9c9b7;color:#5f4936;font-size:12px;text-decoration:none;">${label}</a>`
 }
 
 export function buildEmailHtml(options: BuildEmailHtmlOptions): string {
-  const imageUrl = resolveImageSrc(options.sourceType, options.imageUrl, options.imageCid)
-
-  // Interpolate variables
-  let html = interpolateTemplate(options.template, options.data)
+  const bodyTemplate = String(options.htmlBody || options.template || '<p>Hello {{name}}</p>')
+  const body = compactFragment(interpolateTemplate(bodyTemplate, {
+    ...options.data,
+    company_name: options.companyName || '',
+    header_company_name: options.headerCompanyName || options.companyName || 'Maigun Campaign',
+    footer_company_name: options.footerCompanyName || options.companyName || '',
+    company_address: options.companyAddress || '',
+    company_contact: options.companyContact || '',
+    contact_number: options.contactNumber || '',
+    cta_url: options.ctaUrl || '',
+    whatsapp_url: options.whatsappUrl || '',
+    youtube_url: options.youtubeUrl || ''
+  }))
+  const logoUrl = resolveImageSrc(options.logoSourceType || 'url', options.logoUrl, options.logoCid)
+  const bannerUrl = resolveImageSrc(options.bannerSourceType || options.sourceType || 'url', options.bannerUrl || options.imageUrl, options.bannerCid || options.imageCid)
+  const inlineImageUrl = resolveImageSrc(options.inlineImageSourceType || 'url', options.inlineImageUrl, options.inlineImageCid)
+  const pixelBaseUrl = String(options.webhookUrl || '')
+  const pixelSeparator = pixelBaseUrl.includes('?') ? '&' : '?'
+  const headerCompanyName = String(options.headerCompanyName || options.companyName || 'Maigun Campaign')
+  const footerCompanyName = String(options.footerCompanyName || options.companyName || '')
+  const footerContent = String(options.footerContent || 'You are receiving this email because you opted in.')
+  const companyAddress = String(options.companyAddress || '')
+  const companyContact = String(options.companyContact || '')
+  const contactNumber = String(options.contactNumber || '')
+  const socialIconSize = [28, 32, 36].includes(Number(options.socialIconSize)) ? Number(options.socialIconSize) : 32
+  const logoLinkUrl = normalizeLinkUrl(String(options.logoLinkUrl || ''))
+  const bannerLinkUrl = normalizeLinkUrl(String(options.bannerLinkUrl || options.ctaUrl || ''))
+  const inlineImageLinkUrl = normalizeLinkUrl(String(options.inlineImageLinkUrl || ''))
+  const newsletterBadge = options.isNewsletter
+    ? `<span style="display:inline-block;background:#f2ece2;border:1px solid #dcc8a6;padding:6px 10px;border-radius:999px;font-size:11px;line-height:1;color:#574935;">Newsletter ${String(options.newsletterEdition || 'Edition')}</span>`
+    : ''
+  const bodyHasLogoCid = bodyContainsCidImage(body, options.logoSourceType === 'cid' ? options.logoCid : undefined)
+  const bodyHasBannerCid = bodyContainsCidImage(body, options.bannerSourceType === 'cid' ? options.bannerCid : undefined)
+  const bodyHasInlineCid = bodyContainsCidImage(body, options.inlineImageSourceType === 'cid' ? options.inlineImageCid : undefined)
+  const socialLinks = [
+    buildSocialLink(options.facebookUrl, 'Facebook', socialIconSize),
+    buildSocialLink(options.instagramUrl, 'Instagram', socialIconSize),
+    buildSocialLink(options.xUrl, 'X', socialIconSize),
+    buildSocialLink(options.linkedinUrl, 'LinkedIn', socialIconSize),
+    buildSocialLink(options.whatsappUrl, 'WhatsApp', socialIconSize),
+    buildSocialLink(options.youtubeUrl, 'YouTube', socialIconSize)
+  ].filter(Boolean).join('')
+  const unsubscribeUrl = interpolateTemplate('{{unsubscribe_url}}', {
+    ...options.data,
+    unsubscribe_url: options.data?.unsubscribe_url || '#'
+  })
 
   // Build complete email wrapper
-  const emailHtml = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f5f5f5; }
-        .email-container { max-width: 600px; margin: 20px auto; background: white; border-radius: 8px; overflow: hidden; }
-        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; text-align: center; }
-        .content { padding: 20px; }
-        .banner { width: 100%; max-height: 300px; object-fit: cover; margin: 10px 0; border-radius: 4px; }
-        .social-icons { display: flex; gap: 10px; justify-content: center; margin: 20px 0; }
-        .social-icon { width: 40px; height: 40px; }
-        .social-icon a { text-decoration: none; display: block; }
-        .social-icon img { width: 100%; height: 100%; }
-        .footer { background: #f0f0f0; padding: 15px; text-align: center; font-size: 12px; color: #666; }
-        a { color: #667eea; text-decoration: none; }
-        a:hover { text-decoration: underline; }
-      </style>
-    </head>
-    <body>
-      <div class="email-container">
-        <div class="header">
-          <h1>${options.logoText || 'Maigun Campaign'}</h1>
-        </div>
-        <div class="content">
-          ${imageUrl ? `<img src="${imageUrl}" alt="Campaign banner" class="banner">` : ''}
-          ${html}
-          ${options.webhookUrl ? `<img src="${options.webhookUrl}?campaign_id={{campaign_id}}&email={{email}}" width="1" height="1" alt="" style="border:0;">` : ''}
-        </div>
-        <div class="footer">
-          <p>© 2024. This is an automated email.</p>
-        </div>
-      </div>
-    </body>
-    </html>
-  `
+  const emailHtml = buildWrappedEmailHtml({
+    subject: String(options.data?.campaign_name || 'Campaign'),
+    bodyHtml: body,
+    newsletterBadgeHtml: newsletterBadge,
+    logoHtml: logoUrl && !bodyHasLogoCid
+      ? `${logoLinkUrl ? `<a href="${logoLinkUrl}" style="text-decoration:none;">` : ''}<img src="${logoUrl}" alt="${headerCompanyName} logo" width="84" style="display:block;width:84px;max-width:84px;height:auto;margin:0 auto;border:0;outline:none;text-decoration:none;" />${logoLinkUrl ? '</a>' : ''}`
+      : '',
+    bannerHtml: bannerUrl && !bodyHasBannerCid
+      ? `${bannerLinkUrl ? `<a href="${bannerLinkUrl}" style="text-decoration:none;">` : ''}<img src="${bannerUrl}" alt="Banner" width="640" style="display:block;width:100%;max-width:640px;height:auto;border:0;outline:none;text-decoration:none;border-radius:12px;" />${bannerLinkUrl ? '</a>' : ''}`
+      : '',
+    inlineImageHtml: inlineImageUrl && !bodyHasInlineCid
+      ? `${inlineImageLinkUrl ? `<a href="${inlineImageLinkUrl}" style="text-decoration:none;">` : ''}<img src="${inlineImageUrl}" alt="Inline image" width="640" style="display:block;width:100%;max-width:640px;height:auto;border:0;outline:none;text-decoration:none;border-radius:10px;" />${inlineImageLinkUrl ? '</a>' : ''}`
+      : '',
+    trackingPixelHtml: options.webhookUrl ? `<img src="${pixelBaseUrl}${pixelSeparator}campaign_id={{campaign_id}}&email={{email}}" width="1" height="1" alt="" style="border:0;" />` : '',
+    footerContent,
+    footerCompanyName,
+    companyAddress,
+    companyContact,
+    contactNumberHtml: contactNumber ? `<tr><td align="center" style="padding:4px 0 0 0;font-size:12px;line-height:18px;color:#666;"><a href="tel:${contactNumber}" style="color:#666;text-decoration:none;">${contactNumber}</a></td></tr>` : '',
+    socialRowHtml: socialLinks,
+    unsubscribeUrl
+  })
 
   return DOMPurify.sanitize(emailHtml, { ALLOWED_TAGS: ['*'], ALLOWED_ATTR: ['*'] })
+}
+
+export function buildTextFallback(options: BuildEmailHtmlOptions): string {
+  return buildInterpolatedTextFallback(
+    String(options.textBody || options.htmlBody || options.template || ''),
+    options.data,
+    String(options.htmlBody || options.template || '')
+  )
 }
 
 export { resolveImageSrc, normalizeLinkUrl, interpolateTemplate }

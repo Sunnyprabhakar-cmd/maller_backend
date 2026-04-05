@@ -7,6 +7,10 @@ const router = Router()
 
 router.use(authMiddleware)
 
+function hashToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex')
+}
+
 // Generate new API token
 router.post('/generate', async (req: Request, res: Response) => {
   try {
@@ -19,11 +23,18 @@ router.post('/generate', async (req: Request, res: Response) => {
     const apiToken = await prisma.apiToken.create({
       data: {
         name: name || 'Generated Token',
-        token
+        token: hashToken(token)
       }
     })
 
-    res.json(apiToken)
+    res.json({
+      id: apiToken.id,
+      name: apiToken.name,
+      token,
+      createdAt: apiToken.createdAt,
+      updatedAt: apiToken.updatedAt,
+      lastUsedAt: apiToken.lastUsedAt
+    })
   } catch (error: any) {
     res.status(400).json({ error: error.message })
   }
