@@ -5,6 +5,7 @@ import cors from 'cors'
 import dotenv from 'dotenv'
 import { PrismaClient } from '@prisma/client'
 import { createHash } from 'crypto'
+import { isFallbackAuthEnabled } from './middleware/auth.js'
 
 // Routes
 import campaignRoutes from './api/campaigns.js'
@@ -18,6 +19,10 @@ const configuredOrigin = process.env.ELECTRON_ORIGIN || 'http://localhost:5173'
 
 function isAllowedOrigin(origin?: string): boolean {
   if (!origin) {
+    return true
+  }
+
+  if (configuredOrigin === '*') {
     return true
   }
 
@@ -106,6 +111,9 @@ const PORT = process.env.PORT || 3000
 httpServer.listen(PORT, () => {
   console.log(`[Backend] Server running on http://localhost:${PORT}`)
   console.log(`[Socket.io] WebSocket enabled on ws://localhost:${PORT}`)
+  if (isFallbackAuthEnabled()) {
+    console.warn('[Auth] Fallback dev token auth is enabled because no API_TOKEN/API_AUTH_TOKEN is configured and NODE_ENV is not production.')
+  }
 })
 
 // Graceful shutdown

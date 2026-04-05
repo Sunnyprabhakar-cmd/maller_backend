@@ -7,7 +7,9 @@ interface SendEmailOptions {
   campaignId: string
   subject: string
   html: string
+  text?: string
   from?: string
+  replyTo?: string
   attachments?: Array<{ filename: string; data: string; cid: string }>
 }
 
@@ -34,6 +36,12 @@ export class MailgunService {
       form.append('to', options.to)
       form.append('subject', options.subject)
       form.append('html', options.html)
+      if (options.text) {
+        form.append('text', options.text)
+      }
+      if (options.replyTo) {
+        form.append('h:Reply-To', options.replyTo)
+      }
       
       // Custom data for webhook tracking
       form.append('v:campaign_id', options.campaignId)

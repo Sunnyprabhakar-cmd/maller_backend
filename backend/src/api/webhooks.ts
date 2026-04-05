@@ -127,10 +127,44 @@ function buildPlaceholderCampaign(campaignId: string, email?: string | null) {
   return {
     name: `Recovered campaign ${suffix}`,
     subject: `Webhook activity for ${email || 'unknown recipient'}`,
+    status: 'sent',
     template: '<p>Webhook activity received.</p>',
+    htmlBody: '<p>Webhook activity received.</p>',
+    textBody: 'Webhook activity received.',
+    isNewsletter: false,
+    newsletterEdition: '',
+    senderEmail: null,
+    replyToEmail: null,
+    companyName: 'Mailgun',
+    headerCompanyName: 'Mailgun',
+    footerCompanyName: 'Mailgun',
+    companyAddress: null,
+    companyContact: null,
+    contactNumber: null,
+    footerContent: '',
     sourceType: 'url' as const,
     imageUrl: null,
     imageCid: null,
+    logoSourceType: null,
+    logoUrl: null,
+    logoLinkUrl: null,
+    logoCid: null,
+    bannerSourceType: 'url' as const,
+    bannerUrl: null,
+    bannerLinkUrl: null,
+    bannerCid: null,
+    inlineImageSourceType: null,
+    inlineImageUrl: null,
+    inlineImageLinkUrl: null,
+    inlineImageCid: null,
+    ctaUrl: null,
+    facebookUrl: null,
+    instagramUrl: null,
+    xUrl: null,
+    linkedinUrl: null,
+    whatsappUrl: null,
+    youtubeUrl: null,
+    socialIconSize: 32,
     webhookUrl: null,
     createdAt: now,
     updatedAt: now
@@ -186,6 +220,130 @@ async function resolveCampaignId(prisma: PrismaClient, explicitCampaignId: strin
 
   return null
 }
+
+// Handle pixel tracking (1x1 GIF)
+router.get('/track/open', async (req: Request, res: Response) => {
+  try {
+    const { campaign_id, email } = req.query
+    const prisma = (req as any).prisma as PrismaClient
+    const io = (global as any).io
+
+    if (!campaign_id || !email) {
+      // Return 1x1 pixel even if params missing
+      const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', 'base64')
+      res.set('Content-Type', 'image/gif')
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+      return res.send(pixel)
+    }
+
+    const campaignId = String(campaign_id).trim()
+    const normalizedEmail = String(email).trim().toLowerCase()
+
+    // Check for duplicate open event
+    const existingOpen = await prisma.webhookEvent.findFirst({
+      where: {
+        campaignId,
+        email: { equals: normalizedEmail, mode: 'insensitive' },
+        event: 'opened'
+      },
+      select: { id: true }
+    })
+
+    if (!existingOpen) {
+      // Create open event
+      await prisma.webhookEvent.create({
+        data: {
+          campaignId,
+          email: normalizedEmail,
+          event: 'opened',
+          data: { source: 'pixel-tracking' }
+        }
+      })
+
+      // Broadcast via socket.io
+      if (io) {
+        io.emit('webhook:event', {
+          campaignId,
+          email: normalizedEmail,
+          event: 'opened',
+          timestamp: new Date()
+        })
+      }
+
+      console.log(`[Pixel] Tracked open for ${normalizedEmail} in campaign ${campaignId}`)
+    }
+
+    // Return 1x1 pixel
+    const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', 'base64')
+    res.set('Content-Type', 'image/gif')
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+    res.send(pixel)
+  } catch (error: any) {
+    console.error('[Pixel] Error:', error.message)
+    // Still return pixel on error
+    const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', 'base64')
+    res.set('Content-Type', 'image/gif')
+    res.send(pixel)
+  }
+})
+
+// Handle click tracking redirects
+router.get('/track/click', async (req: Request, res: Response) => {
+  try {
+    const { url, campaign_id, email } = req.query
+    const prisma = (req as any).prisma as PrismaClient
+    const io = (global as any).io
+
+    const targetUrl = String(url || '')
+    const campaignId = campaign_id ? String(campaign_id).trim() : null
+    const normalizedEmail = email ? String(email).toLowerCase().trim() : null
+
+    // Record click if we have required params
+    if (campaignId && normalizedEmail) {
+      const existingClick = await prisma.webhookEvent.findFirst({
+        where: {
+          campaignId,
+          email: { equals: normalizedEmail, mode: 'insensitive' },
+          event: 'clicked'
+        },
+        select: { id: true }
+      })
+
+      if (!existingClick) {
+        await prisma.webhookEvent.create({
+          data: {
+            campaignId,
+            email: normalizedEmail,
+            event: 'clicked',
+            data: { url: targetUrl }
+          }
+        })
+
+        if (io) {
+          io.emit('webhook:event', {
+            campaignId,
+            email: normalizedEmail,
+            event: 'clicked',
+            timestamp: new Date()
+          })
+        }
+
+        console.log(`[Click] Tracked click for ${normalizedEmail} in campaign ${campaignId}`)
+      }
+    }
+
+    // Redirect to target
+    if (targetUrl && (targetUrl.startsWith('http://') || targetUrl.startsWith('https://'))) {
+      return res.redirect(targetUrl)
+    }
+
+    // Fallback redirect
+    res.redirect('https://google.com')
+  } catch (error: any) {
+    console.error('[Click] Error:', error.message)
+    res.redirect('https://google.com')
+  }
+})
 
 // Handle Mailgun webhooks
 router.post('/', async (req: Request, res: Response) => {

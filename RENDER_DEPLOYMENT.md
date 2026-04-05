@@ -1,228 +1,170 @@
-# Render Deployment Guide - Maller Backend
+# Render Deployment Guide - Maigun Backend
 
-Your Mailgun backend is now pushed to GitHub at:
-👉 **https://github.com/Sunnyprabhakar-cmd/maller_backend**
+This guide reflects the current project behavior:
 
-This guide walks you through deploying it to Render with PostgreSQL database.
+- the Electron app prefers hosted sync and hosted send
+- the desktop app still keeps local fallback behavior
+- Render deploys the backend with Prisma schema generation and `db:push`
 
-## 🚀 5-Minute Render Deployment
+## Render Services
 
-### Step 1: Create Render PostgreSQL Database
-1. Go to **[render.com](https://render.com)** and sign in
-2. Click **New +** → **PostgreSQL**
-3. Fill in:
-   - **Name:** `maller-postgres`
-   - **Database Name:** `maigun` (or any name)
-   - **Database User:** `postgres`
-   - **Plan:** Free (0.25 GB)
-   - **Region:** Choose closest to you
-4. Click **Create Database**
-5. Wait 2-3 minutes for creation
-6. **Copy the Internal Database URL** (you'll need this)
-   - Format: `postgresql://user:password@host.render.internal:5432/dbname`
+The repo already includes [render.yaml](/home/sunny/maigun_from_scratch/render.yaml) with:
 
-### Step 2: Deploy Backend Service to Render
-1. Click **New +** → **Web Service**
-2. Connect your GitHub account if needed
-3. Select your repository: **Sunnyprabhakar-cmd/maller_backend**
-4. Fill in configuration:
-   ```
-   Name: maller-backend
-   Runtime: Node
-   Region: (same as database)
-   Branch: main
-   Build Command: npm install && npm run build && npm run db:push
-   Start Command: npm start
-   Plan: Free
-   ```
-5. **Add Environment Variables**:
-   ```
-   NODE_ENV = production
-   PORT = 3000
-   DATABASE_URL = [PASTE FROM STEP 1]
-   MAILGUN_API_KEY = [YOUR MAILGUN API KEY]
-   MAILGUN_WEBHOOK_SIGNING_KEY = [MAILGUN Signing Key from domain settings]
-   MAILGUN_DOMAIN = [YOUR MAILGUN DOMAIN]
-   API_TOKEN = [GENERATE: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"]
-   WEBHOOK_URL = https://maller-backend-1.onrender.com/api/webhooks
-   ELECTRON_ORIGIN = *
-   ```
-6. Click **Create Web Service**
-7. **Wait 5-10 minutes** for the first deployment
-8. Check dashboard for your service URL (current live URL): `https://maller-backend-1.onrender.com`
-
-### Step 3: Update Mailgun Webhooks
-1. Go to **Mailgun Dashboard** → **Sending** → **Webhooks**
-2. Click **Add Webhook**
-3. Fill in:
-   ```
-   URL: https://maller-backend-1.onrender.com/api/webhooks
-   Events: All (All the following)
-   ```
-4. Click **Save**
-
-### Step 4: Update Maigun Electron App
-In your Maigun Electron app, create `.env.local`:
-```
-REACT_APP_API_URL=https://maller-backend-1.onrender.com/api
-REACT_APP_API_TOKEN=[GENERATE: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"]
-REACT_APP_WS_URL=https://maller-backend-1.onrender.com
+```yaml
+buildCommand: "cd backend && npm install && npm run db:generate && npm run db:push && npm run build"
+startCommand: "cd backend && npm start"
 ```
 
-Run the Electron app:
-```bash
-npm run dev
+## 1. Create PostgreSQL On Render
+
+1. Sign in to Render.
+2. Create a new PostgreSQL service.
+3. Use a name such as `maigun-postgres`.
+4. Copy the connection string after provisioning finishes.
+
+## 2. Create The Web Service
+
+1. Create a new Web Service from your GitHub repo.
+2. Use the settings from [render.yaml](/home/sunny/maigun_from_scratch/render.yaml), or configure them manually:
+
+```text
+Runtime: Node
+Build Command: cd backend && npm install && npm run db:generate && npm run db:push && npm run build
+Start Command: cd backend && npm start
 ```
 
-### Step 5: Test End-to-End
-1. Open your Electron app
-2. Create a campaign
-3. Add test recipients
-4. Send test email
-5. Verify email arrived in inbox
-6. Check webhook events in Events tab in app
-7. **Celebrate! 🎉**
+3. Set these environment variables:
 
----
+```text
+NODE_ENV=production
+PORT=3000
+DATABASE_URL=<render postgres connection string>
+MAILGUN_API_KEY=<mailgun api key>
+MAILGUN_WEBHOOK_SIGNING_KEY=<mailgun signing key>
+MAILGUN_DOMAIN=<your mailgun domain>
+API_TOKEN=<strong bootstrap token>
+WEBHOOK_URL=https://your-service.onrender.com/api/webhooks
+ELECTRON_ORIGIN=*
+```
 
-## 📋 Environment Variables Reference
+Auth rules for Render production:
 
-| Variable | Format | Where to Get |
-|----------|--------|--------------|
-| `DATABASE_URL` | `postgresql://user:pass@host/db` | Render PostgreSQL → Connection String |
-| `MAILGUN_API_KEY` | `key-xxxxx` | Mailgun → Account → API Keys → Private Key |
-| `MAILGUN_WEBHOOK_SIGNING_KEY` | alpha-numeric signing key | Mailgun → Sending → Domains → (your domain) → Webhooks → Signing Key |
-| `MAILGUN_DOMAIN` | `yourdomain.mailgun.org` | Mailgun → Domains → (Your verified domain) |
-| `API_TOKEN` | random 64-char | Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
-| `WEBHOOK_URL` | `https://your-service.onrender.com/api/webhooks` | Render → Settings → Service URL |
+- there is no fallback `dev-token-12345` acceptance in production
+- authentication works through DB-issued API tokens or an explicit bootstrap token set with `API_TOKEN` or `API_AUTH_TOKEN`
+- keep the bootstrap token only if you intentionally want break-glass access
 
----
+## 3. Configure Mailgun Webhooks
 
-## 🔍 API Endpoints
+Point Mailgun to:
 
-Your backend exposes these endpoints (all require Bearer token):
+```text
+https://your-service.onrender.com/api/webhooks
+```
+
+The backend also exposes:
+
+- `GET /api/webhooks/track/open`
+- `GET /api/webhooks/track/click`
+
+for open and click tracking pixels/redirects.
+
+## 4. Configure The Electron App
+
+Create `.env.local` in the repo root:
 
 ```bash
-# Test health
-curl https://maller-backend-1.onrender.com/health
-
-# Create campaign
-POST /api/campaigns
-Header: Authorization: Bearer YOUR_API_TOKEN
-
-# Send test email
-POST /api/campaigns/{id}/send-test
-{
-  "testEmail": "user@example.com"
-}
-
-# Get all campaigns
-GET /api/campaigns
+REACT_APP_API_URL=https://your-service.onrender.com/api
+REACT_APP_API_TOKEN=<api token>
+REACT_APP_WS_URL=https://your-service.onrender.com
 ```
 
----
+Notes:
 
-## 🛠️ Troubleshooting
+- `API_TOKEN` can be your explicit bootstrap token initially
+- the backend also supports generated hashed API tokens
+- once you generate a DB token, prefer `REACT_APP_API_TOKEN=<db token>` for the desktop app
+- campaign create/save/import/send now try hosted sync first and fall back locally if needed
 
-### Build fails: "Cannot find module '@prisma/client'"
-**Solution:** Render auto-runs `npm install && npm run build && npm run db:push`. If it fails:
-1. Check Render logs: Dashboard → maller-backend → Logs
-2. Ensure DATABASE_URL is correct
-3. Retry deployment
+## 5. Validate The Deployment
 
-### Webhooks not received
-1. Verify webhook URL in Mailgun matches your Render service URL exactly
-2. Check Render logs for 401 errors (token validation)
-3. Ensure `API_TOKEN` is set correctly
-
-### WebSocket connection fails
-1. Check browser console for WebSocket errors
-2. Verify `REACT_APP_WS_URL` in .env.local
-3. Use `https://` (wss://) not `http://`
-
-### Database connection refused
-1. Check DATABASE_URL is copied exactly from Render PostgreSQL
-2. Verify PostgreSQL service is running (Render → Services → maller-postgres)
-3. Wait 2-3 minutes after creating PostgreSQL service
-
----
-
-## 📊 Monitor Your Deployment
-
-**View Logs:**
-- Render → maller-backend → Logs (real-time)
-
-**Check Database:**
-- Render → maller-postgres → Metrics
-- Or use Prisma Studio: `npm run db:studio` (local only)
-
-**Monitor API Health:**
+### Health
 ```bash
-curl https://maller-backend-1.onrender.com/health
+curl https://your-service.onrender.com/health
 ```
 
----
+### Backend Tests
+```bash
+cd backend
+npm test
+```
 
-## 🚢 Auto-Deploy on Git Push
+### Desktop Build
+```bash
+npm run build
+```
 
-Every time you push to `main` branch, Render automatically:
-1. Pulls the latest code
-2. Runs build command
-3. Runs migrations
-4. Deploys within 2-5 minutes
+### End-To-End Smoke Test
+
+1. Start the Electron app.
+2. Create a campaign.
+3. Save it.
+4. Import recipients from CSV.
+5. Send a test email.
+6. Send the campaign.
+7. Confirm events appear in the app.
+
+## Current Hosted-First Behavior
+
+When the backend is reachable:
+
+- campaign create/save sync to hosted backend
+- CSV recipients sync to hosted backend
+- test sends go through hosted backend first
+- full sends go through hosted backend first
+
+If hosted sync/send fails:
+
+- local campaign state is preserved
+- local fallback send path still works
+- the UI shows whether the action succeeded locally or via hosted backend
+
+## Troubleshooting
+
+### Prisma schema mismatch on Render
+Make sure the build command includes:
 
 ```bash
-# Make changes locally
-git add .
-git commit -m "Update feature"
-
-# Push to GitHub
-git push origin main
-
-# Check Render dashboard for deployment status
-# Logs will show build progress in real-time
+npm run db:generate && npm run db:push
 ```
 
----
+### Mailgun webhooks rejected
+Check:
 
-## 🔐 Security Checklist
+- `MAILGUN_WEBHOOK_SIGNING_KEY`
+- `WEBHOOK_URL`
+- Mailgun dashboard webhook URL
 
-- ✅ Database URL **not** committed to git
-- ✅ API token is **strong** (32+ random characters)
-- ✅ CORS origin set to `*` for development (restrict in production)
-- ✅ Mailgun signatures verified server-side
-- ✅ Environment variables set in Render (not in code)
+### Electron cannot reach backend
+Check:
 
----
+- `REACT_APP_API_URL`
+- `REACT_APP_API_TOKEN`
+- `REACT_APP_WS_URL`
+- `ELECTRON_ORIGIN`
 
-## 📈 Scaling Tips
+### Hosted sync fails but local app still works
+That is expected fallback behavior. The app is designed to preserve local operation when the hosted backend is unavailable.
 
-**Free Tier Limitations:**
-- Spins down after 15 min inactivity (first request = 30s cold start)
-- PostgreSQL auto-deletes after 90 days if unused
-- 2 concurrent requests max
+### Backend starts with a fallback auth warning
+That warning is expected only in non-production when:
 
-**For Production:**
-- Upgrade Plan to "Standard" ($7/month)
-- Remove auto-sleep: Render → Settings → Auto-Pause
-- Add database replica for failover
+- `NODE_ENV` is not `production`
+- no explicit `API_TOKEN` or `API_AUTH_TOKEN` is configured
 
----
+On Render production, you should not see that warning.
 
-## Next Steps
+## Recommended Next Checks
 
-1. ✅ Backend deployed to Render
-2. ✅ PostgreSQL database running
-3. ✅ Mailgun webhooks configured
-4. Next: Update Maigun Electron app with backend URLs
-5. Then: Test end-to-end email sending
-
----
-
-**Your Backend URL:** 🔗 https://maller-backend-1.onrender.com
-
-**GitHub Repository:** 🔗 https://github.com/Sunnyprabhakar-cmd/maller_backend
-
-**API Documentation:** See backend/CONFIG.md
-
-Happy deploying! 🚀
+- Rotate bootstrap tokens after initial deployment
+- Restrict `ELECTRON_ORIGIN` if you know your final client origin policy
+- Monitor Render logs during first send and first webhook delivery
