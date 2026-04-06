@@ -70,12 +70,20 @@ model CampaignRecipient {
   email      String
   name       String?
   data       Json?    // CSV row data for template interpolation
+  sendStatus       String   @default("queued")
+  sendAttempts     Int      @default(0)
+  lastSendError    String?
+  queuedAt         DateTime @default(now())
+  sentAt           DateTime?
+  processedAt      DateTime?
+  mailgunMessageId String?
 
   campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@unique([campaignId, email])
   @@index([campaignId])
   @@index([email])
+  @@index([campaignId, sendStatus])
 }
 
 model WebhookEvent {

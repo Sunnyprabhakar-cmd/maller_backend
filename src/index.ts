@@ -14,6 +14,7 @@ import { isFallbackAuthEnabled } from './middleware/auth.js'
 import campaignRoutes from './api/campaigns.js'
 import webhookRoutes from './api/webhooks.js'
 import tokenRoutes from './api/tokens.js'
+import { campaignSendQueue } from './services/campaign-send-queue.js'
 
 dotenv.config()
 
@@ -127,6 +128,8 @@ io.on('connection', (socket) => {
 
 // Make io available globally for webhooks
 ;(global as any).io = io
+campaignSendQueue.bindIoProvider(() => io)
+campaignSendQueue.start()
 
 // Error handling
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -150,6 +153,7 @@ httpServer.listen(PORT, () => {
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('\n[Shutdown] Closing server...')
+  campaignSendQueue.stop()
   httpServer.close()
   await prisma.$disconnect()
   process.exit(0)

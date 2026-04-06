@@ -14,14 +14,16 @@
 - `WEBHOOK_URL` - Full URL for Mailgun callbacks
 - `EMAIL_ASSET_BASE_URL` - Optional public base URL for email assets (social icons)
 - `ELECTRON_ORIGIN` - CORS origin for Electron app
+- `REDIS_URL` - Redis connection string for BullMQ background sends
 
 ### Example Configurations
 
-#### Development (Local SQLite)
+#### Development (Local PostgreSQL)
 ```env
 NODE_ENV=development
 PORT=3000
-DATABASE_URL=file:./dev.db
+DATABASE_URL=postgresql://user:password@localhost:5432/maigun_dev
+REDIS_URL=
 MAILGUN_API_KEY=key-xxxxxx
 MAILGUN_DOMAIN=sandbox123.mailgun.org
 API_TOKEN=dev-token-12345
@@ -35,6 +37,7 @@ ELECTRON_ORIGIN=http://localhost:5173
 NODE_ENV=production
 PORT=3000
 DATABASE_URL=postgresql://user:pass@host.render.internal:5432/db
+REDIS_URL=redis://user:password@host:6379
 MAILGUN_API_KEY=key-xxxxxx
 MAILGUN_DOMAIN=yourdomain.mailgun.org
 API_TOKEN=[strong-random-token]

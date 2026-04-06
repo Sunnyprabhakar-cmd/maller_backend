@@ -7,6 +7,7 @@ import { buildEmailHtml, buildTextFallback, getSocialIconInlineAttachments } fro
 import type { BuildEmailHtmlOptions } from '../services/render.js'
 import mailer from '../services/mailer.js'
 import { PrismaClient } from '@prisma/client'
+import { campaignSendQueue } from '../services/campaign-send-queue.js'
 
 const router = Router()
 
@@ -116,7 +117,7 @@ function buildCampaignCreateRecord(input: Record<string, unknown>) {
   return base
 }
 
-function buildEmailVariables(campaign: any, recipient: { email: string; name?: string | null; data?: any }) {
+export function buildEmailVariables(campaign: any, recipient: { email: string; name?: string | null; data?: any }) {
   return {
     ...(recipient.data && typeof recipient.data === 'object' ? recipient.data : {}),
     name: recipient.name || '',
@@ -176,7 +177,7 @@ function normalizeLocalFilePath(value: unknown): string {
   }
 }
 
-function mergeCampaignForSend(storedCampaign: any, overrideInput: unknown) {
+export function mergeCampaignForSend(storedCampaign: any, overrideInput: unknown) {
   const override = toRecord(overrideInput)
   const { recipients: _ignoredRecipients, events: _ignoredEvents, ...rest } = override
   const merged = {
@@ -202,7 +203,7 @@ function mergeCampaignForSend(storedCampaign: any, overrideInput: unknown) {
   return merged
 }
 
-function buildEmailHtmlOptions(campaign: any, data: Record<string, unknown>): BuildEmailHtmlOptions {
+export function buildEmailHtmlOptions(campaign: any, data: Record<string, unknown>): BuildEmailHtmlOptions {
   const logoSourceType = campaign.logoSourceType === 'cid' ? 'cid' : 'url'
   const bannerSourceType = campaign.bannerSourceType === 'cid' ? 'cid' : 'url'
   const inlineImageSourceType = campaign.inlineImageSourceType === 'cid' ? 'cid' : 'url'
@@ -247,7 +248,7 @@ function buildEmailHtmlOptions(campaign: any, data: Record<string, unknown>): Bu
   }
 }
 
-function buildTextFallbackOptions(campaign: any, data: Record<string, unknown>) {
+export function buildTextFallbackOptions(campaign: any, data: Record<string, unknown>) {
   return {
     template: campaign.template,
     htmlBody: campaign.htmlBody ?? campaign.template,
@@ -265,7 +266,7 @@ function buildTextFallbackOptions(campaign: any, data: Record<string, unknown>) 
   }
 }
 
-async function buildInlineAttachments(campaign: any): Promise<Array<{ filename: string; data: string; cid: string }>> {
+export async function buildInlineAttachments(campaign: any): Promise<Array<{ filename: string; data: string; cid: string }>> {
   const attachments = new Map<string, { filename: string; data: string; cid: string }>()
 
   const addAttachment = async (label: string, cidValue: unknown, filePathValue: unknown, fileNameValue?: unknown) => {
@@ -307,7 +308,7 @@ async function buildInlineAttachments(campaign: any): Promise<Array<{ filename: 
   return [...attachments.values()]
 }
 
-function renderSubjectTemplate(subject: string | null | undefined, data: Record<string, unknown>): string {
+export function renderSubjectTemplate(subject: string | null | undefined, data: Record<string, unknown>): string {
   let rendered = String(subject ?? '')
   for (const [key, value] of Object.entries(data)) {
     rendered = rendered.replace(new RegExp(`\\{\\{\\s*${key}\\s*\\}\\}`, 'g'), String(value ?? ''))
@@ -399,28 +400,48 @@ router.post('/:id/recipients', async (req: Request, res: Response) => {
     const { recipients } = req.body // Array of { email, name, data: {} }
     const prisma = (req as any).prisma as PrismaClient
 
-    const created = await Promise.all(
-      recipients.map((r: any) =>
-        prisma.campaignRecipient.upsert({
-          where: {
-            campaignId_email: {
+    const created: unknown[] = []
+    const batchSize = 250
+    for (let index = 0; index < recipients.length; index += batchSize) {
+      const batch = recipients.slice(index, index + batchSize)
+      const batchResults = await Promise.all(
+        batch.map((r: any) =>
+          prisma.campaignRecipient.upsert({
+            where: {
+              campaignId_email: {
+                campaignId: req.params.id,
+                email: r.email
+              }
+            },
+            create: {
               campaignId: req.params.id,
-              email: r.email
+              email: r.email,
+              name: r.name,
+              data: r.data,
+              sendStatus: 'queued',
+              sendAttempts: 0,
+              lastSendError: null,
+              queuedAt: new Date(),
+              sentAt: null,
+              processedAt: null,
+              mailgunMessageId: null
+            },
+            update: {
+              name: r.name,
+              data: r.data,
+              sendStatus: 'queued',
+              sendAttempts: 0,
+              lastSendError: null,
+              queuedAt: new Date(),
+              sentAt: null,
+              processedAt: null,
+              mailgunMessageId: null
             }
-          },
-          create: {
-            campaignId: req.params.id,
-            email: r.email,
-            name: r.name,
-            data: r.data
-          },
-          update: {
-            name: r.name,
-            data: r.data
-          }
-        })
+          })
+        )
       )
-    )
+      created.push(...batchResults)
+    }
 
     res.json({ count: created.length })
   } catch (error: any) {
@@ -485,80 +506,8 @@ router.post('/:id/send', async (req: Request, res: Response) => {
     const prisma = (req as any).prisma as PrismaClient
     const io = (req as any).io
 
-    const storedCampaign: any = await prisma.campaign.findUnique({
-      where: { id: req.params.id },
-      include: { recipients: true }
-    })
-
-    if (!storedCampaign) {
-      return res.status(404).json({ error: 'Campaign not found' })
-    }
-
-    const campaign = mergeCampaignForSend(storedCampaign, req.body?.override)
-    console.log(`[Campaign] Hosted bulk send start for campaign ${campaign.id} with ${campaign.recipients.length} recipients`)
-    const attachments = await buildInlineAttachments(campaign)
-    const results: Array<{ email: string; status: 'sent' | 'failed'; error?: string }> = []
-
-    // Treat every bulk send as a fresh cycle so dashboard analytics don't accumulate stale webhook rows.
-    await prisma.webhookEvent.deleteMany({
-      where: { campaignId: campaign.id }
-    })
-
-    let sent = 0
-    let failed = 0
-
-    for (const recipient of campaign.recipients) {
-      try {
-        const data = buildEmailVariables(campaign, recipient)
-        const html = buildEmailHtml(buildEmailHtmlOptions(campaign, data))
-
-        await mailer.sendEmail({
-          to: recipient.email,
-          recipientName: recipient.name || undefined,
-          campaignId: campaign.id,
-          subject: renderSubjectTemplate(campaign.subject, data),
-          html,
-          text: buildTextFallback(buildTextFallbackOptions(campaign, data)),
-          from: campaign.senderEmail || undefined,
-          replyTo: campaign.replyToEmail || undefined,
-          attachments
-        })
-
-        sent++
-        results.push({
-          email: String(recipient.email),
-          status: 'sent'
-        })
-        io.emit('email:sent', {
-          campaignId: campaign.id,
-          email: recipient.email,
-          timestamp: new Date()
-        })
-      } catch (error) {
-        const errorMessage = String((error as Error)?.message ?? error ?? 'Unknown error')
-        failed++
-        results.push({
-          email: String(recipient.email),
-          status: 'failed',
-          error: errorMessage
-        })
-        console.error(`[Campaign] Hosted send failed for ${recipient.email} (campaign: ${campaign.id})`, errorMessage)
-        io.emit('email:failed', {
-          campaignId: campaign.id,
-          email: recipient.email,
-          error: errorMessage
-        })
-      }
-    }
-
-    const firstError = results.find((entry) => entry.status === 'failed' && entry.error)?.error
-    if (failed > 0) {
-      console.warn(`[Campaign] Hosted bulk send finished with failures for campaign ${campaign.id}: sent=${sent}, failed=${failed}${firstError ? `, firstError=${firstError}` : ''}`)
-    } else {
-      console.log(`[Campaign] Hosted bulk send finished for campaign ${campaign.id}: sent=${sent}, failed=0`)
-    }
-
-    res.json({ sent, failed, total: campaign.recipients.length, results, firstError })
+    const result = await campaignSendQueue.enqueueCampaignSend(prisma, req.params.id, req.body?.override, io)
+    return res.status(result.queued ? 202 : 200).json(result)
   } catch (error: any) {
     console.error(`[Campaign] Hosted bulk send route failed for campaign ${req.params.id}`, error?.message || error)
     res.status(400).json({ error: error.message })

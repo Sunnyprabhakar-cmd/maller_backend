@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import mailer from '../services/mailer.js'
+import { campaignSendQueue } from '../services/campaign-send-queue.js'
 
 type CampaignRecord = Record<string, any>
 type RecipientRecord = Record<string, any>
@@ -13,6 +14,32 @@ function createMockPrisma() {
   const campaigns = new Map<string, CampaignRecord>()
   const recipients = new Map<string, RecipientRecord[]>()
   const webhookEvents: Array<Record<string, any>> = []
+
+  function findRecipientLocation(recipientId: string) {
+    for (const [campaignId, rows] of recipients.entries()) {
+      const index = rows.findIndex((entry) => entry.id === recipientId)
+      if (index >= 0) {
+        return { campaignId, rows, index }
+      }
+    }
+    return null
+  }
+
+  function matchesRecipient(entry: RecipientRecord, where: any) {
+    if (!where) {
+      return true
+    }
+    if (where.id && entry.id !== where.id) {
+      return false
+    }
+    if (where.campaignId && entry.campaignId !== where.campaignId) {
+      return false
+    }
+    if (where.sendStatus && entry.sendStatus !== where.sendStatus) {
+      return false
+    }
+    return true
+  }
 
   return {
     campaigns,
@@ -84,13 +111,60 @@ function createMockPrisma() {
 
           const next = {
             id: `recipient-${existingRows.length + 1}`,
+            sendStatus: 'queued',
+            sendAttempts: 0,
+            lastSendError: null,
+            queuedAt: new Date(),
+            sentAt: null,
+            processedAt: null,
+            mailgunMessageId: null,
             ...create
           }
           recipients.set(campaignId, [...existingRows, next])
           return next
+        },
+        async update({ where, data }: any) {
+          const location = findRecipientLocation(where.id)
+          if (!location) {
+            throw new Error('Recipient not found')
+          }
+          const next = {
+            ...location.rows[location.index],
+            ...data
+          }
+          location.rows[location.index] = next
+          recipients.set(location.campaignId, location.rows)
+          return next
+        },
+        async updateMany({ where, data }: any) {
+          let count = 0
+          for (const [campaignId, rows] of recipients.entries()) {
+            const nextRows = rows.map((entry) => {
+              if (!matchesRecipient(entry, where)) {
+                return entry
+              }
+              count += 1
+              return { ...entry, ...data }
+            })
+            recipients.set(campaignId, nextRows)
+          }
+          return { count }
+        },
+        async findMany({ where, take }: any) {
+          const rows = [...(recipients.get(where?.campaignId) ?? [])].filter((entry) => matchesRecipient(entry, where))
+          rows.sort((a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')))
+          return typeof take === 'number' ? rows.slice(0, take) : rows
+        },
+        async count({ where }: any) {
+          return (recipients.get(where?.campaignId) ?? []).filter((entry) => matchesRecipient(entry, where)).length
         }
       },
       webhookEvent: {
+        async create({ data }: any) {
+          const record = { id: `event-${webhookEvents.length + 1}`, createdAt: new Date(), ...data }
+          webhookEvents.push(record)
+          return record
+        },
         async findMany() {
           return webhookEvents
         },
@@ -288,12 +362,11 @@ test('POST /api/campaigns/:id/send emits websocket events and uses rendered emai
     const res = createResponse()
 
     await handler(req, res)
+    await campaignSendQueue.flush()
 
-    assert.equal(res.statusCode, 200)
-    assert.equal(res.body.sent, 1)
-    assert.equal(res.body.failed, 0)
-    assert.equal(res.body.results.length, 1)
-    assert.equal(res.body.results[0].status, 'sent')
+    assert.equal(res.statusCode, 202)
+    assert.equal(res.body.queued, true)
+    assert.equal(res.body.total, 1)
     assert.equal(sendCalls.length, 1)
     assert.equal(sendCalls[0].from, 'sender@example.com')
     assert.equal(sendCalls[0].replyTo, 'reply@example.com')
@@ -306,9 +379,8 @@ test('POST /api/campaigns/:id/send emits websocket events and uses rendered emai
     assert.equal(sendCalls[0].attachments.some((entry: any) => entry.cid === 'logo-inline'), true)
     assert.equal(sendCalls[0].attachments.some((entry: any) => entry.cid === 'body-asset'), true)
     assert.match(sendCalls[0].text, /AB12/)
-    assert.equal(ioEvents.length, 1)
-    assert.equal(ioEvents[0][0], 'email:sent')
-    assert.equal(webhookEvents.length, 0)
+    assert.equal(ioEvents.filter((entry) => entry[0] === 'email:sent').length, 1)
+    assert.equal(webhookEvents.filter((entry) => entry.event === 'sent').length, 1)
   } finally {
     mailer.sendEmail = originalSendEmail
     await fs.rm(logoPath, { force: true })
